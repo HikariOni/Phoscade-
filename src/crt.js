@@ -2,6 +2,51 @@ window.CRT = (function () {
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const lerp = (a, b, t) => a + (b - a) * t;
 
+  /* crtPrng: PRNG deterministico propio (sustituye el LCG clasico de
+     terceros que usaban los passes de CRT). Seed -> generador en [0,1). */
+  function crtPrng(seed) {
+    let x = (Math.imul(seed | 0, 0x7461b827) | 0) ^ 0x39f2a1c6;
+    let w = 0x5b3d90e4 ^ (Math.imul(seed | 0, 0xc2e7a913) | 0);
+    if (!x) x = 0x21e7c4d9;
+    return function () {
+      w = (w + 0xe4b1c957) | 0;
+      x ^= x << 11;
+      x ^= x >>> 19;
+      x ^= x << 21;
+      x = x | 0;
+      let z = (Math.imul(x, 0xada1cf68) + w) | 0;
+      z = (z ^ (z >>> 17)) | 0;
+      z = Math.imul(z, 0x9f6b3ce1) | 0;
+      z = (z ^ (z >>> 12)) | 0;
+      return (z >>> 0) / 4294967296;
+    };
+  }
+
+  /* Sincronismo real: estandares de linea (PAL 625/576 a 50Hz, NTSC 525/480
+     a 59.94, plantilla 810/768 a 60Hz) y el pitch vertical del scanline en
+     pixeles de salida: pitch = alto de imagen / lineas activas. El pitch es
+     fraccional (divisor no entero y relativo a la resolucion activa), asi que
+     el dibujado de scanlines no puede ser 'cada 2px': deriva del estandar. */
+  function signalModel(type, h) {
+    const t = type || 'rect';
+    const base = {
+      rect: { name: 'PANTALLA', fps: 60, fieldHz: 120, total: 810, active: 768, interlaced: false },
+      pal: { name: 'PAL', fps: 25, fieldHz: 50, total: 625, active: 576, interlaced: true },
+      ntsc: { name: 'NTSC', fps: 30, fieldHz: 60, total: 525, active: 480, interlaced: true }
+    }[t] || { name: 'PANTALLA', fps: 60, fieldHz: 120, total: 810, active: 768, interlaced: false };
+    const s = Object.assign({}, base);
+    s.pitch = Math.max(1, (h || 1) / s.active);
+    return s;
+  }
+
+  /* Frame oficial del estandar: los efectos de sincronismo (flicker, campos,
+     raster) se indexan por campo (field). Si 'time' ya es un entero (indice
+     de frame en animaciones) se usa tal cual: preview == GIF. */
+  function frameOf(time, s) {
+    if (typeof time !== 'number') time = performance.now() / 1000;
+    return Number.isInteger(time) ? time : Math.floor(time * s.fieldHz);
+  }
+
   function hexToRgb(h) {
     h = String(h).replace('#', '');
     if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
@@ -167,23 +212,61 @@ window.CRT = (function () {
     ctx.putImageData(img, 0, 0);
   }
 
-  /* Scanlines whose gap darkening depends on luminance: bright content shows
-     strong lines, dark content barely any — authentic phosphor behaviour. */
-  function scanlinesPass(canvas, amount) {
+  /* Scanlines cuyo hueco negro depende de la luminancia (fosforo real) y del
+     pitch del estandar. El pitch es fraccional (lineas activas / alto), asi
+     que cada linea de barrido se dibuja con cobertura continua: para pitch
+     entero reproduce 'una linea si, una no'; para pitch fraccional mezcla suave
+     entre filas (sin bloques artificiales). */
+  function scanlinesPass(canvas, amount, signal) {
     if (amount < 0.01) return;
+    const w = canvas.width, h = canvas.height;
+    const p = Math.max(2, (signal && signal.pitch) ? signal.pitch : h / 768);
+    const ctx = canvas.getContext('2d');
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    for (let y = 0; y < h; y++) {
+      const fr = ((y + 0.5) / p) % 1;
+      const cov = fr < 0.5 ? 0 : (fr - 0.5) * 2;
+      if (cov <= 0.003) continue;
+      const row = y * w * 4;
+      const kc = amount * cov;
+      for (let x = 0; x < w; x++) {
+        const o = row + x * 4;
+        const lum = (0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]) / 255;
+        const k = kc * (0.3 + 0.7 * lum);
+        d[o] *= 1 - k;
+        d[o + 1] *= 1 - k;
+        d[o + 2] *= 1 - k;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  /* Interlace real: dos campos. Con estandares entrelazados (PAL/NTSC) cada
+     imagen se barre en dos campos; la paridad de linea alterna entre campos y
+     produce el 'twittido' de entrelazado (un desplazamiento de 1 scanline).
+     Indexado por frame, asi queda bakeado en GIF/Secuencia igual que el
+     preview. */
+  function interlacePass(canvas, opts, time, signal) {
+    const on = opts.interlace == null ? true : !!opts.interlace;
+    if (!on || !signal || !signal.interlaced) return;
     const w = canvas.width, h = canvas.height;
     const ctx = canvas.getContext('2d');
     const img = ctx.getImageData(0, 0, w, h);
     const d = img.data;
-    for (let y = 1; y < h; y += 2) {
+    const p = signal.pitch;
+    const field = frameOf(time, signal) % 2;
+    const amt = 0.09 + 0.13 * (opts.scanlines || 0);
+    for (let y = 0; y < h; y++) {
+      const band = Math.floor((y + 0.5) / p);
+      if ((band + field) & 1) continue;
       const row = y * w * 4;
       for (let x = 0; x < w; x++) {
         const o = row + x * 4;
-        const lum = 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2];
-        const k = amount * (0.3 + 0.7 * lum / 255);
-        d[o] *= 1 - k;
-        d[o + 1] *= 1 - k;
-        d[o + 2] *= 1 - k;
+        const kk = amt * (0.35 + 0.65 * (0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]) / 255);
+        d[o] *= 1 - kk;
+        d[o + 1] *= 1 - kk;
+        d[o + 2] *= 1 - kk;
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -274,11 +357,8 @@ window.CRT = (function () {
       out.set(src.subarray(sb, sb + row), db);
     }
     const tear = Math.max(1, Math.round(h * 0.05 * amount));
-    let ts = (Math.floor(time) * 2654435761) ^ 0x51ab;
-    const rnd = (n) => {
-      ts = (Math.imul(ts, 1103515245) + 12345) | 0;
-      return (ts >>> 0) % n;
-    };
+    const rand = crtPrng(Math.floor(time));
+    const rnd = (n) => Math.floor(rand() * n);
     for (let k = -tear; k <= tear; k++) {
       const y = (off + k + h) % h;
       const shift = (rnd(200) / 200 - 0.5) * w * 0.12 * amount;
@@ -493,7 +573,7 @@ window.CRT = (function () {
   /* Raster bloom: average picture level drives a slight brightness swell plus
      a slow hum, so the tube seems to breathe with the scene. Cheap thumbnail
      readback keeps the cost low. */
-  function rasterPass(canvas, amount, time) {
+  function rasterPass(canvas, amount, time, signal) {
     if (amount < 0.01 || typeof time !== 'number') return;
     const w = canvas.width, h = canvas.height;
     const tw = Math.max(2, Math.round(w / 24)), th = Math.max(2, Math.round(h / 24));
@@ -505,7 +585,9 @@ window.CRT = (function () {
     let sum = 0;
     for (let i = 0; i < sd.length; i += 4) sum += 0.2126 * sd[i] + 0.7152 * sd[i + 1] + 0.0722 * sd[i + 2];
     const apl = sum / ((tw * th) * 255);
-    const hum = 0.72 + 0.28 * Math.sin(time * 0.9);
+    const s = signal || { fieldHz: 120 };
+    const humHz = s.fieldHz / 120;
+    const hum = 0.72 + 0.28 * Math.sin(time * 0.9 * humHz);
     const add = (apl - 0.45) * amount * hum * 0.75 * 60;
     if (Math.abs(add) < 0.3) return;
     const ctx = canvas.getContext('2d');
@@ -519,19 +601,21 @@ window.CRT = (function () {
     ctx.putImageData(img, 0, 0);
   }
 
-  function flickerPass(ctx, w, h, amount, time) {
+  /* Flicker de tubo indexado por campo: la cadencia la marca el estandar
+     (PAL: 50 campos/s, NTSC: 60, pantalla: 120). flkMain es la caida de
+     luminancia principal; flkExtra, el sub-destello de 40% de flkMain. */
+  function flickerPass(ctx, w, h, amount, time, signal) {
     if (amount < 0.01 || typeof time !== 'number') return;
-    const cadence = 12;
-    const idx = Number.isInteger(time) ? time : Math.floor(time * cadence);
-    let s = (idx * 1664525 + 1013904223) | 0;
-    const rnd = () => {
-      s = (Math.imul(s, 1103515245) + 12345) | 0;
-      return ((s >>> 0) % 10000) / 10000;
-    };
+    const s = signal || { name: 'PANTALLA', fps: 60, fieldHz: 120 };
+    const idx = frameOf(time, s);
+    const rand = crtPrng(idx * 31 + 13);
+    const rnd = () => rand();
     let alpha = 0;
     const n = 2 + Math.floor(rnd() * 3);
+    const extra = amount * 0.4;
     for (let k = 0; k < n; k++) {
       if (rnd() < amount) alpha = Math.max(alpha, 0.05 + rnd() * 0.32 * amount);
+      if (rnd() < extra) alpha = Math.max(alpha, 0.02 + rnd() * 0.10 * extra);
     }
     if (alpha > 0.01) {
       ctx.fillStyle = 'rgba(0,0,0,' + alpha.toFixed(3) + ')';
@@ -549,11 +633,7 @@ window.CRT = (function () {
     const d = img.data;
     const src = d.slice();
     const nLines = 3 + Math.round(amount * 3);
-    let s = (Math.round(Number.isFinite(frame) ? frame : 0) * 2654435761) ^ 0x7f4a7c15;
-    const rand = () => {
-      s = (Math.imul(s, 1103515245) + 12345) | 0;
-      return ((s >>> 0) % 100000) / 100000;
-    };
+    const rand = crtPrng(Math.round(Number.isFinite(frame) ? frame : 0) * 101 + 17);
     for (let k = 0; k < nLines; k++) {
       const y = Math.floor(rand() * h);
       const shift = Math.floor((rand() - 0.5) * w * 0.18 * amount);
@@ -635,9 +715,13 @@ window.CRT = (function () {
     const w = canvas.width, h = canvas.height;
     const ctx = canvas.getContext('2d');
     const snap = cloneCanvas(canvas);
+    const signal = signalModel(opts.type, h);
 
-    /* 1. Eyefish 90s (lente de tubo limpia y geometrica) */
-    const eyeAmt = opts.eyefish || 0;
+    /* 1. Warp geometrico real: curvatura de tubo + lente eyefish como una
+          unica deformacion barrel inversa. 'curvature' aporta el cristal del
+          tubo; 'eyefish' la lente 90s extra; el radio limita el circulo. */
+    const curv = opts.curvature == null ? 0 : clamp(opts.curvature, 0, 1.2);
+    const eyeAmt = clamp((opts.eyefish || 0) + curv * 0.22, 0, 1.2);
     const eyeRad = opts.eyefishRadius == null ? 1 : opts.eyefishRadius;
     let work = (eyeAmt > 0.004 || eyeRad < 0.999) ? eyefishCanvas(snap, eyeAmt, eyeRad) : cloneCanvas(snap);
 
@@ -650,8 +734,11 @@ window.CRT = (function () {
     /* 5. Color grading */
     gradingPass(work, opts);
 
-    /* 6. Scanlines (luminance-modulated gaps) */
-    scanlinesPass(work, opts.scanlines || 0);
+    /* 6. Scanlines (pitch del estandar / lineas activas) */
+    scanlinesPass(work, opts.scanlines || 0, signal);
+
+    /* 6b. Interlace real: dos campos alternos (twittido) */
+    interlacePass(work, opts, time, signal);
 
     ctx.clearRect(0, 0, w, h);
     ctx.imageSmoothingEnabled = true;
@@ -701,8 +788,9 @@ window.CRT = (function () {
       });
     }
 
-    /* 10. Curvature */
-    curvaturePass(ctx, w, h, opts.curvature || 0);
+    /* 10. (curvatura geometrica ya aplicada en la lente barrel de la etapa 1;
+          aqui solo la sombra de vidrio sutil del bezel que la acompania) */
+    glassShade(ctx, w, h, curv);
 
     /* 10b. H-sync hum wave (desplazamiento horizontal animado por fila) */
     if ((opts.wave || 0) > 0.01) {
@@ -721,31 +809,41 @@ window.CRT = (function () {
     /* 12. Tube bezel / frame */
     framePass(ctx, w, h, opts.frame == null ? 0.4 : opts.frame);
 
-    /* 13. Flicker (indexado por frame) */
-    flickerPass(ctx, w, h, opts.flicker || 0, time);
+    /* 13. Flicker (flkMain+flkExtra, cadencia del campo) */
+    flickerPass(ctx, w, h, opts.flicker || 0, time, signal);
 
     /* 15. VHS dropouts */
     dropoutPass(canvas, opts.dropout || 0, time);
 
     /* 16. Raster bloom (APL breathing) + phosphor persistence afterglow */
-    rasterPass(canvas, (opts.raster || 0) / 100, time);
+    rasterPass(canvas, (opts.raster || 0) / 100, time, signal);
     afterglowPass(canvas, (opts.trail || 0) / 100, time);
 
     return canvas;
   }
 
-  function curvaturePass(ctx, w, h, amount) {
+  /* Sombra de vidrio del tubo: oscurecimiento radial suave que acompaña al
+     warp geometrico (su coordenada es la del radio de la lente barrel). */
+  function glassShade(ctx, w, h, amount) {
     if (amount < 0.01) return;
-    ctx.strokeStyle = 'rgba(0,0,0,' + (0.05 + amount * 0.14).toFixed(3) + ')';
-    ctx.lineWidth = 1;
-    const rows = Math.max(2, Math.floor(h / 90));
-    for (let i = 0; i <= rows; i++) {
-      const y = (h / rows) * i;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.quadraticCurveTo(w / 2, y + (i - rows / 2) * (amount * 3), w, y);
-      ctx.stroke();
+    const cx = (w - 1) / 2, cy = (h - 1) / 2;
+    const maxR = Math.max(1e-3, Math.sqrt(cx * cx + cy * cy));
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const k = amount * 0.5;
+    for (let y = 0; y < h; y++) {
+      const dy = (y - cy) / maxR;
+      for (let x = 0; x < w; x++) {
+        const dx = (x - cx) / maxR;
+        const r2 = dx * dx + dy * dy;
+        const f = 1 - k * r2 * r2;
+        const o = (y * w + x) * 4;
+        d[o] = clamp(d[o] * f, 0, 255);
+        d[o + 1] = clamp(d[o + 1] * f, 0, 255);
+        d[o + 2] = clamp(d[o + 2] * f, 0, 255);
+      }
     }
+    ctx.putImageData(img, 0, 0);
   }
 
   apply.bloomPass = bloomPass;

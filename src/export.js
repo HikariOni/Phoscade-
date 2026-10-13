@@ -144,6 +144,27 @@ window.Export = (function () {
     download(name + '.webm', blob);
   }
 
+  /* Secuencia PNG: codifica cada canvas a PNG y devuelve el payload que el
+     main convertira en archivos app.nnnn.png dentro de una carpeta. */
+  async function seqPayload(frames, name, onProgress) {
+    const items = [];
+    for (let i = 0; i < frames.length; i++) {
+      const blob = await toBlob(frames[i], 'image/png');
+      const buf = await blob.arrayBuffer();
+      items.push({ index: i + 1, bytes: new Uint8Array(buf) });
+      if (onProgress) onProgress(i + 1, frames.length);
+    }
+    return { name: (name || 'dither-seq'), items };
+  }
+
+  async function pngSequence(frames, name, onProgress) {
+    const payload = await seqPayload(frames, name, onProgress);
+    if (!window.ditherStudio || typeof window.ditherStudio.saveSequence !== 'function') {
+      throw new Error('Guardado de secuencia no disponible en este contexto');
+    }
+    return window.ditherStudio.saveSequence(payload);
+  }
+
   return {
     download,
     svg,
@@ -153,6 +174,8 @@ window.Export = (function () {
     svgOut,
     gif,
     toGIF,
-    video
+    video,
+    seqPayload,
+    pngSequence
   };
 })();

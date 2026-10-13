@@ -3,6 +3,10 @@
 
   const $ = (id) => document.getElementById(id);
 
+  /* Muestreo de video: el preview trabaja acotado al borde largo para agilidad;
+     al exportar se re-muestrea a resolución nativa. */
+  const VIDEO_PREVIEW_CAP = 1280;
+
   const ui = {};
   const rangeLabel = {};
   const rangeFmt = {};
@@ -545,14 +549,15 @@
 
   const ALGO_TITLES = {
     floydsteinberg: 'Diffusion d\'erreur', falsefloyd: 'False Floyd', jarvis: 'Jarvis', stucki: 'Stucki',
-    burkes: 'Burkes', sierra: 'Sierra', sierra2: 'Sierra 2', sierralite: 'Sierra Lite', atkinson: 'Atkinson',
+    burkes: 'Burkes', sierra: 'Sierra', sierra2: 'Sierra 2', sierralite: 'Sierra 2-4A', atkinson: 'Atkinson',
+    adaptivefs3: 'Adaptive FS 3×3', adaptivefs7: 'Adaptive FS 7×7', customkernel: 'Kernel personalizado', riemersma: 'Riemersma (Hilbert)',
     bayer: 'Bayer', modulation: 'Modulación', bitmappattern: 'Patrón', ascii: 'ASCII'
   };
 
   function renderAlgoOpts() {
     const box = ui.algoOpts;
     const algo = ui.algoSelect.value;
-    const diff = ['floydsteinberg', 'falsefloyd', 'jarvis', 'stucki', 'burkes', 'sierra', 'sierra2', 'sierralite', 'atkinson'].includes(algo);
+    const diff = ['floydsteinberg', 'falsefloyd', 'jarvis', 'stucki', 'burkes', 'sierra', 'sierra2', 'sierralite', 'atkinson', 'adaptivefs3', 'adaptivefs7', 'customkernel', 'riemersma'].includes(algo);
     let html = '';
     if (diff) {
       html += '<label class="check"><input type="checkbox" id="serpentine" checked/><span>Barrido serpentino</span></label>';
@@ -589,12 +594,11 @@
       html += '<label class="field"><span class="field-label">Tamaño de carácter <b id="valAscii">8 px</b></span><input type="range" id="asciiScale" min="4" max="32" value="8"/></label>';
       html += '<label class="field"><span class="field-label">Conjunto</span><select id="asciiCharset"><option value="classic">Clásico</option><option value="blocks">Bloques</option><option value="partial">Bloques parciales</option><option value="minimal">Minimal</option><option value="digits">Dígitos</option><option value="binary">Binario</option></select></label>';
       html += '<label class="check"><input type="checkbox" id="asciiInvert"/><span>Invertir</span></label>';
+    } else if (algo === 'customkernel') {
+      html += '<details id="customKernelBox" open><summary>Kernel personalizado</summary><textarea id="kernelText" rows="3" spellcheck="false" placeholder=". . * 7&#10;3 5 1"></textarea><p class="hint">· Fila a fila, separado por espacios: «*» es el píxel actual, «.» o «0» celdas vacías, enteros = pesos. El divisor es la suma de los pesos.</p></details>';
     }
     if (algo !== 'ascii') {
-      html += '<label class="field"><span class="field-label">Multiplicador de celda</span><select id="algoMult">';
-      html += '<option value="1" selected>×1 (detalle completo)</option>';
-      html += '<option value="2">×2</option><option value="4">×4</option><option value="6">×6</option><option value="8">×8</option>';
-      html += '</select></label>';
+      html += '<label class="field"><span class="field-label">Escala (celda) <b id="valAlgoMult">1</b></span><input type="range" id="algoMult" min="1" max="8" step="1" value="1"/></label>';
       html += '<p class="hint">' + algoHint(algo) + '</p>';
     }
     box.innerHTML = html;
@@ -635,11 +639,16 @@
       $('asciiInvert').addEventListener('change', () => { markCustom(); schedule(); });
     } else if (diff) {
       $('serpentine').addEventListener('change', () => { markCustom(); schedule(); });
+    } else if (algo === 'customkernel') {
+      const kt = $('kernelText');
+      if (kt) kt.addEventListener('input', () => { markCustom(); schedule(); });
+      const kb = $('customKernelBox');
+      if (kb) kb.querySelector('summary').addEventListener('click', schedule);
     } else {
       $('bayerSize').addEventListener('change', () => { markCustom(); schedule(); });
     }
     const mEl = $('algoMult');
-    if (mEl) mEl.addEventListener('change', () => { markCustom(); schedule(); });
+    if (mEl) mEl.addEventListener('input', () => { $('valAlgoMult').textContent = '×' + mEl.value; markCustom(); schedule(); });
   }
 
   function algoHint(algo) {
@@ -651,8 +660,12 @@
       burkes: 'Núcleo compacto de 2 filas muy usado.',
       sierra: 'Difusión de 3 filas con distribución completa.',
       sierra2: 'Versión de 2 filas de Sierra.',
-      sierralite: 'La más simple de la familia Sierra.',
+      sierralite: 'Sierra 2-4A: la más simple de la familia Sierra (misma difusión ÷4).',
       atkinson: 'Reparte 6/8 del error, da textura acentuada.',
+      adaptivefs3: 'Floyd–Steinberg adaptativo: el núcleo 3×3 se orienta al gradiente local para no cruzar bordes.',
+      adaptivefs7: 'Adaptativo con esténcil gaussiano 7×7, más disperso y direccional en bordes.',
+      customkernel: 'Define tu propio núcleo de difusión por pesos (».» = vacío, «*» = píxel actual, enteros = pesos, divisor = suma).',
+      riemersma: 'Recorre la imagen por curva de Hilbert y difunde con una cola de 16 errores de peso exponencial (T. Riemersma), sin barrido serpentino.',
       bayer: 'Umbral mediante matriz ordenada de Bayer.',
       modulation: 'Ruido modulado: azul Ulichney, blanco, Bayer, IGN retro, Knoll foto, valor, Perlin o Worley, con fuerza global y por zonas + bandas + ripple.',
       bitmappattern: 'Umbral por repetición de un patrón de mapa de bits.'
@@ -821,15 +834,30 @@
     }
   }
 
+  /* Look de fábrica para un reel (video): degradado continuo B/N. No toca el
+     modo de trabajo (SELECTIVO/GLITCH) ni la máscara; solo el color de base. */
+  function applyReelLookDefault() {
+    state.palUse = 'wheel';
+    state.stops = [
+      { pos: 0, color: '#000000' },
+      { pos: 100, color: '#ffffff' }
+    ];
+    if (ui.colorMode) {
+      if (ui.colorMode.value !== 'palRueda') ui.colorMode.value = 'palRueda';
+      ui.colorMode.dispatchEvent(new Event('change'));
+    }
+  }
+
   /* ---------------- params collection ---------------- */
 
   function collectAlgoOpts() {
     const algo = ui.algoSelect.value;
     const mult = algo !== 'ascii' && $('algoMult') ? +$('algoMult').value : 1;
-    const diff = ['floydsteinberg', 'falsefloyd', 'jarvis', 'stucki', 'burkes', 'sierra', 'sierra2', 'sierralite', 'atkinson'].includes(algo);
+    const diff = ['floydsteinberg', 'falsefloyd', 'jarvis', 'stucki', 'burkes', 'sierra', 'sierra2', 'sierralite', 'atkinson', 'adaptivefs3', 'adaptivefs7', 'customkernel', 'riemersma'].includes(algo);
     let o;
     if (diff) {
       o = { serpentine: $('serpentine') ? $('serpentine').checked : true };
+      if (algo === 'customkernel') o.kernelText = $('kernelText') ? $('kernelText').value : '';
     } else if (algo === 'bayer') {
       o = { size: $('bayerSize') ? +$('bayerSize').value : 4 };
     } else if (algo === 'modulation') {
@@ -857,6 +885,7 @@
       o = {};
     }
     o.mult = mult;
+    o.errStrength = $('errStrength') ? (+$('errStrength').value / 100) : 0;
     return o;
   }
 
@@ -899,6 +928,8 @@
         brightness: (+ui.preBrightness.value) / 100,
         contrast: (+ui.preContrast.value + 100) / 100,
         gamma: (+ui.preGamma.value) / 100,
+        midGamma: (+ui.midGamma.value) / 100,
+        hlComp: (+ui.hlComp.value) / 100,
         curve: state.curveLut || buildCurveLut()
       },
       outputRange: {
@@ -910,6 +941,7 @@
     };
     if (extra) Object.assign(p, extra);
     DitherEngine.preparePattern(p);
+    DitherEngine.prepareKernel(p);
     return p;
   }
 
@@ -965,6 +997,7 @@
     return {
       enabled: true,
       type: ui.crtType ? ui.crtType.value : 'rect',
+      interlace: ui.crtInterlace ? ui.crtInterlace.checked : true,
       mask: ui.crtMask ? ui.crtMask.value : 'grille',
       scanlines: +ui.crtScanlines.value / 100,
       phosphor: +ui.crtPhosphor.value / 100,
@@ -998,15 +1031,35 @@
 
   /* ---------------- mascara selectiva (grano en una sola pasada) ---------------- */
 
+  /* Origen del material activo: 'video' (reel real), 'gif' (GIF animado) o
+     'image' (fotografia / imagen fija / animacion procedural). La mascara
+     selectiva es un pipeline de composicion de material en movimiento: solo
+     aplica a video y GIF animado, nunca a imagen fija. */
+  function currentSourceKind() {
+    const src = ui.animSource ? ui.animSource.value : 'procedural';
+    if (src === 'video') return 'video';
+    if (src === 'gif') return 'gif';
+    if (state.isVideo) return 'video';
+    if (state.gifFrames && state.gifFrames.length) return 'gif';
+    return 'image';
+  }
+
+  function maskApplies() {
+    return currentSourceKind() !== 'image';
+  }
+
   function collectMaskOpts() {
     return {
-      enabled: ui.maskCheck ? ui.maskCheck.checked : false,
+      enabled: (ui.maskCheck ? ui.maskCheck.checked : false) && maskApplies(),
+      sourceKind: currentSourceKind(),
       source: ui.maskSource ? ui.maskSource.value : 'brillo',
       threshold: ui.maskThresh ? +ui.maskThresh.value : 50,
       smooth: ui.maskSmooth ? +ui.maskSmooth.value : 25,
       opacity: ui.maskOpacity ? +ui.maskOpacity.value : 100,
       color: ui.maskColor ? ui.maskColor.value : '#2a5aff',
-      bw: ui.maskBW ? ui.maskBW.checked : true
+      bw: ui.maskBW ? ui.maskBW.checked : true,
+      centerKey: ui.maskCenter ? ui.maskCenter.checked : true,
+      preview: ui.maskPreview ? ui.maskPreview.checked : false
     };
   }
 
@@ -1015,8 +1068,8 @@
     if (ui.maskOpts) ui.maskOpts.classList.toggle('hidden', !on);
   }
 
-  /* Render del fotograma. Con mascara activa siempre se compone por overlay
-     (doble capa, tanto imagen fija como video): la base es la "capa original"
+  /* Render del fotograma. Con mascara activa y fuente en movimiento (video o
+     GIF animado) siempre se compone por overlay (doble capa): la base es la "capa original"
      (mapa continuo del modo de color/gradiente activo via renderFlat, sin
      dither) y la capa afectada es el dither del algoritmo activo, en B&N por
      defecto para leerse como luminancia superpuesta, mezcladas pixel a pixel
@@ -1030,7 +1083,7 @@
       sharpen: ui.sharpen ? +ui.sharpen.value : 0,
       crtEnabled,
       crtOpts: collectCrtOpts(),
-      bloomTintOverride: (ui.maskCheck && ui.maskCheck.checked && ui.maskColor) ? ui.maskColor.value : null,
+      bloomTintOverride: (ui.maskCheck && ui.maskCheck.checked && maskApplies() && ui.maskColor) ? ui.maskColor.value : null,
       bloomFallback: null
     };
     // Si CRT esta apagado pero Bloom esta configurado (> 0), se aplica standalone
@@ -1062,7 +1115,11 @@
   function updateInfoLabel() {
     const algo = ALGO_TITLES[ui.algoSelect.value] || ui.algoSelect.value;
     const modes = { bw: 'B&N', duotone: 'Duotono', tritone: 'Tritono', preserve: 'Color', palRueda: 'Paleta · Rueda' };
-    return algo + ' · ' + (modes[ui.colorMode.value] || '') + (dualLayerActive() ? ' · Doble capa' : '');
+    let tail = '';
+    if (dualLayerActive()) {
+      tail = maskApplies() ? ' · Doble capa' : ' · Máscara inactiva (solo video/GIF)';
+    }
+    return algo + ' · ' + (modes[ui.colorMode.value] || '') + tail;
   }
 
   function setInfoDim(busy) {
@@ -1073,9 +1130,27 @@
     const pv = ui.preview;
     if (pv.width !== canvas.width) pv.width = canvas.width;
     if (pv.height !== canvas.height) pv.height = canvas.height;
+    let src = canvas;
+    /* "Ver matte en el monitor": overlay de monitoreo, el export nunca lo usa. */
+    if (ui.maskCheck && ui.maskCheck.checked && maskApplies() &&
+        ui.maskPreview && ui.maskPreview.checked && window.StudioEngine.maskKeyCanvas) {
+      const params = upgradeParams();
+      if (params) {
+        const maskC = window.StudioEngine.maskKeyCanvas(params, collectMaskOpts());
+        const comp = document.createElement('canvas');
+        comp.width = canvas.width; comp.height = canvas.height;
+        const cctx = comp.getContext('2d');
+        cctx.imageSmoothingEnabled = false;
+        cctx.drawImage(canvas, 0, 0);
+        cctx.globalAlpha = 0.85;
+        cctx.globalCompositeOperation = 'screen';
+        cctx.drawImage(maskC, 0, 0);
+        src = comp;
+      }
+    }
     const ctx = pv.getContext('2d');
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(canvas, 0, 0);
+    ctx.drawImage(src, 0, 0);
   }
 
   /* ---------------- animation ---------------- */
@@ -1151,6 +1226,7 @@
 
   function loadVideoFile(file) {
     resetToDefaults();
+    applyReelLookDefault();
     state.isVideo = true;
     syncExpUI();
     updateExpHint();
@@ -1234,14 +1310,17 @@
     state.frames = [];
   }
 
-  function sampleVideoFrames() {
+  function sampleVideoFrames(scale) {
     const v = state.videoEl;
     if (!v || !state.videoReady) return Promise.resolve(null);
     const n = Math.max(2, +ui.animRhythm.value);
     const wantDur = ui.vidDuration ? +ui.vidDuration.value : 1.5;
     const dur = Math.max(0.2, Math.min(v.duration || wantDur, wantDur));
-    const vw = v.videoWidth, vh = v.videoHeight;
-    if (!vw || !vh) return Promise.resolve(null);
+    const vw0 = v.videoWidth, vh0 = v.videoHeight;
+    if (!vw0 || !vh0) return Promise.resolve(null);
+    const s = scale || 1;
+    const vw = Math.max(1, Math.round(vw0 * s));
+    const vh = Math.max(1, Math.round(vh0 * s));
     const out = [];
     let chain = Promise.resolve();
     for (let i = 0; i < n; i++) {
@@ -1249,11 +1328,40 @@
       chain = chain.then(() => seekVideo(v, t)).then(() => {
         const c = document.createElement('canvas');
         c.width = vw; c.height = vh;
-        c.getContext('2d').drawImage(v, 0, 0, vw, vh);
+        const cctx = c.getContext('2d');
+        cctx.imageSmoothingEnabled = true;
+        cctx.drawImage(v, 0, 0, vw, vh);
         out.push(c);
       });
     }
     return chain.then(() => out);
+  }
+
+  function renderSampledFrames(sampled, fps, echoAmt) {
+    const raw = [];
+    let prev = null;
+    for (let i = 0; i < sampled.length; i++) {
+      const src = sampled[i];
+      const w = src.width;
+      const h = src.height;
+      const wc = document.createElement('canvas');
+      wc.width = w; wc.height = h;
+      const wctx = wc.getContext('2d');
+      wctx.imageSmoothingEnabled = true;
+      wctx.drawImage(src, 0, 0, w, h);
+      const rgba = wctx.getImageData(0, 0, w, h).data;
+      const p = upgradeParams();
+      if (!p) break;
+      p.width = w; p.height = h; p.rgba = rgba;
+      p.animNoise = ui.animNoise ? (+ui.animNoise.value || 0) / 100 : 0;
+      p.animSeed = i;
+      const core = renderCore(p, i);
+      let fr = applyFrameEffects(core, p, i);
+      if (echoAmt > 0) fr = window.StudioEngine.blendEcho(prev, fr, echoAmt);
+      prev = fr;
+      raw.push(fr);
+    }
+    return raw;
   }
 
   function buildVideoAnimFrames() {
@@ -1265,35 +1373,18 @@
       return;
     }
     state.animBusy = true;
-    ui.animHint.textContent = 'Muestreando video...';
-    sampleVideoFrames().then((sampled) => {
+    const vw0 = state.videoEl ? state.videoEl.videoWidth : 0;
+    const vh0 = state.videoEl ? state.videoEl.videoHeight : 0;
+    state.previewScale = Math.min(1, VIDEO_PREVIEW_CAP / Math.max(vw0, vh0, VIDEO_PREVIEW_CAP));
+    const scaleTxt = state.previewScale < 1 ? ' (' + Math.round(state.previewScale * 100) + '%)' : '';
+    ui.animHint.textContent = 'Muestreando video' + scaleTxt + '...';
+    sampleVideoFrames(state.previewScale).then((sampled) => {
       if (!sampled || !sampled.length) throw new Error('sin frames');
       const fps = +ui.animRhythm.value;
       const delayMs = 1000 / fps;
       const echoAmt = ui.animEcho ? (+ui.animEcho.value || 0) / 100 : 0;
-      const raw = [];
-      let prev = null;
-      for (let i = 0; i < sampled.length; i++) {
-        const src = sampled[i];
-        const w = src.width;
-        const h = src.height;
-        const wc = document.createElement('canvas');
-        wc.width = w; wc.height = h;
-        const wctx = wc.getContext('2d');
-        wctx.imageSmoothingEnabled = true;
-        wctx.drawImage(src, 0, 0, w, h);
-        const rgba = wctx.getImageData(0, 0, w, h).data;
-        const p = upgradeParams();
-        if (!p) break;
-        p.width = w; p.height = h; p.rgba = rgba;
-        p.animNoise = ui.animNoise ? (+ui.animNoise.value || 0) / 100 : 0;
-        p.animSeed = i;
-        const core = renderCore(p, i);
-        let fr = applyFrameEffects(core, p, i);
-        if (echoAmt > 0) fr = window.StudioEngine.blendEcho(prev, fr, echoAmt);
-        prev = fr;
-        raw.push(fr);
-      }
+      const raw = renderSampledFrames(sampled, fps, echoAmt);
+      if (!raw.length) throw new Error('sin frames render');
       const hold = ui.vidHold ? Math.max(0, +ui.vidHold.value | 0) : 0;
       for (let k = 0; k < hold && raw.length; k++) raw.push(raw[raw.length - 1]);
       const boomOn = ui.animBoomerang ? ui.animBoomerang.checked : true;
@@ -1302,16 +1393,46 @@
       state.animBoom = boomOn;
       state.frames = boomerangize(raw, boomOn);
       state.workingW = raw[0].width; state.workingH = raw[0].height;
+      state.workingRGBA = sampled[0].width && sampled[0].height
+        ? sampled[0].getContext('2d').getImageData(0, 0, sampled[0].width, sampled[0].height).data
+        : state.workingRGBA;
       startPreviewLoop(delayMs);
       ui.animHint.textContent = boomOn
-        ? 'Video Boomerang: ' + raw.length + ' -> ' + state.frames.length + ' ping-pong.'
-        : 'Video: ' + raw.length + ' frames ditherizados.';
+        ? 'Video Boomerang: ' + raw.length + ' -> ' + state.frames.length + ' ping-pong' + scaleTxt + '.'
+        : 'Video: ' + raw.length + ' frames ditherizados' + scaleTxt + '.';
       state.animBusy = false;
     }).catch((e) => {
       console.error(e);
       ui.animHint.textContent = 'No se pudo muestrear el video. Revisa el formato.';
       state.animBusy = false;
     });
+  }
+
+  /* Re-muestrea y re-renderiza el reel a resolución nativa solo cuando se
+     exporta (GIF / WebM / secuencia). El preview trabaja al cap mientras
+     tanto. Devuelve null si no aplica. */
+  async function framesForExport() {
+    if (!state.isVideo || !state.videoReady) return null;
+    const s = state.previewScale || 1;
+    if (s >= 0.999) return null;
+    if (!((state.rawFrames && state.rawFrames.length) || (state.frames && state.frames.length))) return null;
+    const n = Math.max(2, +ui.animRhythm.value);
+    const fps = +ui.animRhythm.value;
+    const echoAmt = ui.animEcho ? (+ui.animEcho.value || 0) / 100 : 0;
+    ui.animHint.textContent = 'Re-render a resolución nativa…';
+    try {
+      const sampled = await sampleVideoFrames(1);
+      if (!sampled || !sampled.length) return null;
+      const raw = renderSampledFrames(sampled, fps, echoAmt);
+      if (!raw.length) return null;
+      const hold = ui.vidHold ? Math.max(0, +ui.vidHold.value | 0) : 0;
+      for (let k = 0; k < hold && raw.length; k++) raw.push(raw[raw.length - 1]);
+      const boomOn = ui.animBoomerang ? ui.animBoomerang.checked : true;
+      return { raw, delayMs: 1000 / fps, boomOn, fps };
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
   }
 
   function buildProceduralFallback(baseParams) {
@@ -1451,9 +1572,13 @@
         Export.svgOut(base.rgba, base.width, base.height, { scale: 1 }, name);
         toast('SVG exportado');
       } else if (fmt === 'gif') {
+        const ntv = await framesForExport();
         let frames;
         let delay;
-        if (ui.animCheck.checked && state.frames.length) {
+        if (ntv) {
+          frames = ntv.boomOn ? boomerangize(ntv.raw.map(f => cloneCanvas(f)), true) : ntv.raw.slice();
+          delay = ntv.delayMs;
+        } else if (ui.animCheck.checked && state.frames.length) {
           frames = state.frames.map(f => cloneCanvas(f));
           delay = 1000 / (+ui.animRhythm.value);
         } else if (ui.animBoomerang && ui.animBoomerang.checked && state.rawFrames && state.rawFrames.length) {
@@ -1465,11 +1590,14 @@
           delay = 250;
         }
         Export.gif(frames, { delayMs: delay, transparent: ui.transpCheck.checked }, name);
-        toast('GIF exportado');
+        toast('GIF exportado' + (ntv ? ' (nativa)' : ''));
       } else if (fmt === 'video') {
         const fps = +ui.animRhythm.value;
+        const ntv = await framesForExport();
         let frames;
-        if (ui.animCheck.checked && state.frames.length) {
+        if (ntv) {
+          frames = ntv.boomOn ? boomerangize(ntv.raw, true) : ntv.raw;
+        } else if (ui.animCheck.checked && state.frames.length) {
           frames = state.frames;
         } else if (state.rawFrames && state.rawFrames.length) {
           frames = boomerangize(state.rawFrames, true);
@@ -1478,7 +1606,26 @@
           frames = [cloneCanvas(c)];
         }
         await Export.video(frames, { fps, loop: true }, name);
-        toast('Video exportado');
+        toast('Video exportado' + (ntv ? ' (nativa)' : ''));
+      } else if (fmt === 'seq') {
+        const ntv = await framesForExport();
+        let frames;
+        if (ntv) {
+          frames = ntv.raw;
+        } else if (state.rawFrames && state.rawFrames.length) {
+          frames = state.rawFrames;
+        } else {
+          frames = [await exportCanvas()];
+        }
+        const progress = (n, t) => {
+          if (ui.expHint) ui.expHint.textContent = 'Secuencia PNG: codificando ' + n + '/' + t;
+        };
+        const res = await Export.pngSequence(frames, name, progress);
+        if (res && !res.canceled) {
+          toast('Secuencia PNG: ' + res.count + ' frames en ' + res.dir);
+        } else {
+          toast('Export de secuencia cancelado');
+        }
       }
     } catch (e) {
       console.error(e);
@@ -1765,6 +1912,9 @@
     const snap = { algo, colorMode: ui.colorMode.value, mult: '1', contrast: +ui.preContrast.value, mode: state.mode };
     const mEl = $('algoMult');
     if (mEl) snap.mult = mEl.value;
+    snap.midGamma = +ui.midGamma.value;
+    snap.hlComp = +ui.hlComp.value;
+    snap.errStrength = $('errStrength') ? +$('errStrength').value : 0;
     if (algo === 'modulation') {
       snap.mod = {
         type: $('modType') ? $('modType').value : 'blue',
@@ -1816,7 +1966,9 @@
         thresh: +ui.maskThresh.value, smooth: +ui.maskSmooth.value,
         opacity: ui.maskOpacity ? +ui.maskOpacity.value : 100,
         color: ui.maskColor ? ui.maskColor.value : '#2a5aff',
-        bw: ui.maskBW ? ui.maskBW.checked : true
+        bw: ui.maskBW ? ui.maskBW.checked : true,
+        centerKey: ui.maskCenter ? ui.maskCenter.checked : true,
+        preview: ui.maskPreview ? ui.maskPreview.checked : false
       };
     }
     return snap;
@@ -1853,10 +2005,22 @@
     }
     if (p.mod) setModUI(p.mod.type, p.mod.scale, p.mod.str, p.mod.zd, p.mod.zm, p.mod.zl, p.mod.bands, p.mod.ripple);
     const mEl = $('algoMult');
-    if (mEl && p.mult) { mEl.value = String(p.mult); mEl.dispatchEvent(new Event('change', { bubbles: true })); }
+    if (mEl && p.mult) { mEl.value = String(p.mult); mEl.dispatchEvent(new Event('input', { bubbles: true })); }
     if (p.contrast != null) {
       ui.preContrast.value = p.contrast;
       ui.preContrast.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (p.midGamma != null && ui.midGamma) {
+      ui.midGamma.value = p.midGamma;
+      ui.midGamma.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (p.hlComp != null && ui.hlComp) {
+      ui.hlComp.value = p.hlComp;
+      ui.hlComp.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (p.errStrength != null && $('errStrength')) {
+      $('errStrength').value = p.errStrength;
+      $('errStrength').dispatchEvent(new Event('input', { bubbles: true }));
     }
     if (p.sharpen != null && $('sharpen')) {
       $('sharpen').value = p.sharpen;
@@ -1884,6 +2048,8 @@
       if (ui.maskOpacity) ui.maskOpacity.value = p.mask.opacity != null ? p.mask.opacity : 100;
       if (ui.maskColor) ui.maskColor.value = p.mask.color || '#2a5aff';
       if (ui.maskBW) ui.maskBW.checked = p.mask.bw !== false;
+      if (ui.maskCenter) ui.maskCenter.checked = p.mask.centerKey !== false;
+      if (ui.maskPreview) ui.maskPreview.checked = p.mask.preview === true;
       syncMaskUI();
       const lt = $('valMaskTh'); if (lt) lt.textContent = ui.maskThresh.value;
       const ls = $('valMaskSm'); if (ls) ls.textContent = ui.maskSmooth.value;
@@ -2007,6 +2173,9 @@
       preBrightness: $('preBrightness'),
       preContrast: $('preContrast'),
       preGamma: $('preGamma'),
+      midGamma: $('midGamma'),
+      hlComp: $('hlComp'),
+      errStrength: $('errStrength'),
       darkCut: $('darkCut'),
       lightCut: $('lightCut'),
       transpCheck: $('transpCheck'),
@@ -2036,6 +2205,8 @@
       crtCheck: $('crtCheck'),
       crtOpts: $('crtOpts'),
       crtType: $('crtType'),
+      crtInterlace: $('crtInterlace'),
+      crtSyncInfo: $('crtSyncInfo'),
       crtMask: $('crtMask'),
       crtBloomBlend: $('crtBloomBlend'),
       crtBloomTint: $('crtBloomTint'),
@@ -2068,6 +2239,7 @@
     maskBW: $('maskBW'),
     maskColor: $('maskColor'),
       maskPreview: $('maskPreview'),
+      maskCenter: $('maskCenter'),
       palDetails: $('palPalette'),
       palHex: $('palHex'),
       palEdit: $('palEdit'),
@@ -2079,6 +2251,7 @@
       btnFit: $('btnFit'),
       btn100: $('btn100'),
       btnVideo: $('btnVideo'),
+      btnSeq: $('btnSeq'),
       toneCurve: $('toneCurve'),
       btnCurveReset: $('btnCurveReset'),
       sharpen: $('sharpen')
@@ -2124,6 +2297,9 @@
     bindRange('preBrightness', 'valBright');
     bindRange('preContrast', 'valContrast');
     bindRange('preGamma', 'valGamma', (v) => (v / 100).toFixed(2));
+    bindRange('midGamma', 'valMid', (v) => (v / 100).toFixed(2));
+    bindRange('hlComp', 'valHl');
+    bindRange('errStrength', 'valErrStr');
     bindRange('darkCut', 'valDark');
     bindRange('lightCut', 'valLight');
 
@@ -2272,17 +2448,20 @@
     bindRange('crtEcho', 'valCrtEcho');
     bindRange('sharpen', 'valSharpen');
     bindToneCurve();
-    if (ui.crtType) ui.crtType.addEventListener('change', () => { markCustom(); schedule(); });
+    if (ui.crtType) ui.crtType.addEventListener('change', () => { markCustom(); schedule(); updateCrtSync(); });
+    if (ui.crtInterlace) ui.crtInterlace.addEventListener('change', () => { markCustom(); schedule(); updateCrtSync(); });
     if (ui.crtMask) ui.crtMask.addEventListener('change', () => { markCustom(); schedule(); });
     if (ui.crtBloomBlend) ui.crtBloomBlend.addEventListener('change', () => { markCustom(); schedule(); });
     if (ui.crtBloomTint) ui.crtBloomTint.addEventListener('input', () => { markCustom(); schedule(); });
     if (ui.crtEchoMode) ui.crtEchoMode.addEventListener('change', () => { markCustom(); schedule(); });
 
-    if (ui.maskCheck) {
+if (ui.maskCheck) {
       ui.maskCheck.addEventListener('change', () => { syncMaskUI(); markCustom(); schedule(); });
-    if (ui.maskSource) ui.maskSource.addEventListener('change', () => { markCustom(); schedule(); });
-    if (ui.maskBW) ui.maskBW.addEventListener('change', () => { markCustom(); schedule(); });
-    bindRange('maskThresh', 'valMaskTh');
+      if (ui.maskSource) ui.maskSource.addEventListener('change', () => { markCustom(); schedule(); });
+      if (ui.maskBW) ui.maskBW.addEventListener('change', () => { markCustom(); schedule(); });
+      if (ui.maskCenter) ui.maskCenter.addEventListener('change', () => { markCustom(); schedule(); });
+      if (ui.maskPreview) ui.maskPreview.addEventListener('change', () => { markCustom(); schedule(); });
+      bindRange('maskThresh', 'valMaskTh');
       bindRange('maskSmooth', 'valMaskSm');
       bindRange('maskOpacity', 'valMaskOp', (v) => v + '%');
       if (ui.maskColor) ui.maskColor.addEventListener('input', () => { markCustom(); schedule(); });
@@ -2293,6 +2472,7 @@
     $('btnSvg').addEventListener('click', () => handleExport('svg'));
     $('btnGif').addEventListener('click', () => handleExport('gif'));
     if (ui.btnVideo) ui.btnVideo.addEventListener('click', () => handleExport('video'));
+    if (ui.btnSeq) ui.btnSeq.addEventListener('click', () => handleExport('seq'));
 
     ui.btnFit.addEventListener('click', () => { setView('fit'); });
     ui.btn100.addEventListener('click', () => { setView('100'); });
@@ -2328,6 +2508,12 @@
     });
 
     loadSample();
+
+    window.DFXReel = { apply: applyReelLookDefault };
+
+    if (typeof window.performance.mark === 'function') window.performance.mark('boot.done');
+    const boot = document.getElementById('boot');
+    if (boot) boot.classList.add('done');
   }
 
   function syncAnimSourceUI() {
@@ -2340,7 +2526,10 @@
     const vid = !!state.isVideo;
     const still = document.querySelectorAll('.exp-still');
     for (let i = 0; i < still.length; i++) still[i].hidden = vid;
+    const gifSrc = ui.animSource ? ui.animSource.value === 'gif' : false;
+    const motion = vid || gifSrc || (state.rawFrames && state.rawFrames.length);
     if (ui.btnVideo) ui.btnVideo.hidden = !vid;
+    if (ui.btnSeq) ui.btnSeq.hidden = !motion;
   }
 
   function updateExpHint() {
@@ -2350,10 +2539,29 @@
       ? 'Modo Selectivo (reel B&N): máscara al metraje en blanco y negro. '
       : 'Modo Glitch Art: animación/flicker sobre la imagen. ';
     if (state.isVideo) {
-      ui.expHint.textContent = modeTag + 'Salida ' + s + '×' + (state.workingH || 0) + ' px (celda ' + cell + 'x). GIF/WebM animados a resolución nativa.';
+      ui.expHint.textContent = modeTag + 'Salida ' + s + '×' + (state.workingH || 0) + ' px (celda ' + cell + 'x). GIF/WebM/Secuencia PNG a resolución nativa.';
+    } else if (ui.animSource && ui.animSource.value === 'gif') {
+      ui.expHint.textContent = modeTag + 'Salida ' + s + '×' + (state.workingH || 0) + ' px (celda ' + cell + 'x). GIF/Secuencia PNG animados a resolución nativa.';
     } else {
       ui.expHint.textContent = modeTag + 'Salida ' + s + '×' + (state.workingH || 0) + ' px (celda ' + cell + 'x). PNG/JPEG/SVG/GIF a resolución nativa.';
     }
+    updateCrtSync();
+  }
+
+  function updateCrtSync() {
+    if (!ui.crtSyncInfo) return;
+    const stds = {
+      rect: { name: 'PANTALLA', fps: 60, active: 768, interlaced: false },
+      pal: { name: 'PAL', fps: 25, active: 576, interlaced: true },
+      ntsc: { name: 'NTSC', fps: 30, active: 480, interlaced: true }
+    };
+    const t = ui.crtType ? ui.crtType.value : 'rect';
+    const st = stds[t] || stds.rect;
+    const h = state.workingH || 0;
+    const pitch = h ? (h / st.active).toFixed(2) + ' px' : '–';
+    const field = st.interlaced ? (st.fps * 2) + ' campos/s' : 'progresivo';
+    const inter = (ui.crtInterlace && ui.crtInterlace.checked) ? 'ON' : 'OFF';
+    ui.crtSyncInfo.textContent = 'SEÑAL ' + st.name + ' · ' + st.fps + ' fps · ' + st.active + 'L activas · pitch ' + pitch + ' · ' + field + ' · INTERLACE ' + inter;
   }
 
   function setView(mode) {

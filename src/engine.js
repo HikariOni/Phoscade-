@@ -66,10 +66,19 @@
     return out;
   }
 
-  /* Overlay de composicion real: base viva + grano selectivo por alpha. */
+  /* Overlay de composicion real: base viva + grano selectivo por alpha.
+     El matte usa la MISMA rejilla que el grano: cuando el dither corre en
+     celdas (mult > 1), la clave de luminancia se muestrea por celda y se
+     expande a bloques identicos al estampado de dither.js, de modo que el
+     borde del overlay coincide exactamente con las celdas del grano y se
+     elimina la invasion de media celda (la "mascara desfasada"). Con mult=1
+     el matte queda por pixel. */
   function renderMaskOverlay(params, maskOpts) {
     const w = params.width, h = params.height;
     const cfg = maskOpts;
+    const aOpts = params.algorithmOpts || {};
+    const mult = (params.algorithm !== 'ascii' && aOpts.mult > 1) ? aOpts.mult : 1;
+    const gw = Math.ceil(w / mult);
     const maskC = Dither().maskFromLuma(params.rgba, w, h, Object.assign({}, cfg, {
       pre: params.pre, outputRange: params.outputRange, invert: params.invert
     }));
@@ -86,6 +95,39 @@
     }
     const grain = Dither()(g).canvas;
 
+    const npix = w * h;
+    let cellM = null;
+    if (mult > 1) {
+      const gh = Math.ceil(h / mult);
+      const gcells = gw * gh;
+      if (cfg.centerKey) {
+        /* Borde duro: cada celda se decide por su pixel central. El limite
+           del overlay cae exacto sobre la frontera de celdas (la celda de
+           borde queda totalmente dentro o fuera) en vez de una mezcla. */
+        cellM = new Float32Array(gcells);
+        const ox = mult >> 1, oy = mult >> 1;
+        for (let cy = 0; cy < gh; cy++) {
+          const py = Math.min(h - 1, cy * mult + oy);
+          for (let cx = 0; cx < gw; cx++) {
+            const px = Math.min(w - 1, cx * mult + ox);
+            cellM[cy * gw + cx] = md[(py * w + px) * 4] / 255;
+          }
+        }
+      } else {
+        const cm = new Float64Array(gcells);
+        const cc = new Uint32Array(gcells);
+        for (let i = 0; i < npix; i++) {
+          const j = (((i / w) | 0) / mult | 0) * gw + ((i % w) / mult | 0);
+          cm[j] += md[i * 4] / 255;
+          cc[j]++;
+        }
+        cellM = new Float32Array(gcells);
+        for (let j = 0; j < gcells; j++) {
+          if (cc[j]) cellM[j] = cm[j] / cc[j];
+        }
+      }
+    }
+
     const out = document.createElement('canvas');
     out.width = w; out.height = h;
     const octx = out.getContext('2d');
@@ -93,10 +135,15 @@
     const od = oid.data;
     const bd = base.getContext('2d').getImageData(0, 0, w, h).data;
     const gd = grain.getContext('2d').getImageData(0, 0, w, h).data;
-    const npix = w * h;
     for (let i = 0; i < npix; i++) {
       const o = i * 4;
-      const m = md[o] / 255;
+      let m;
+      if (cellM) {
+        const j = (((i / w) | 0) / mult | 0) * gw + ((i % w) / mult | 0);
+        m = cellM[j];
+      } else {
+        m = md[o] / 255;
+      }
       od[o] = bd[o] + (gd[o] - bd[o]) * m;
       od[o + 1] = bd[o + 1] + (gd[o + 1] - bd[o + 1]) * m;
       od[o + 2] = bd[o + 2] + (gd[o + 2] - bd[o + 2]) * m;
@@ -113,6 +160,56 @@
       return Dither()(params).canvas;
     }
     return renderMaskOverlay(params, maskOpts);
+  }
+
+  /* Canvas de la clave (matte) lista para preview: overlay solo de monitoreo.
+     La salida/export nunca lo usa, solo el modo "Ver matte en el monitor". */
+  function maskKeyCanvas(params, maskOpts) {
+    return Dither().maskFromLuma(params.rgba, params.width, params.height, Object.assign({}, maskOpts, {
+      pre: params.pre, outputRange: params.outputRange, invert: params.invert
+    }));
+  }
+
+  /* Matriz por celda de la clave (m por celda), expuesta para diagnostico
+     y QA: mis valores de interes son el borde duro (centerKey -> {0,1}) vs
+     el borde suave (media -> parciales en la celda de frontera). */
+  function maskCellMatrix(params, maskOpts, mult) {
+    const w = params.width, h = params.height;
+    const cfg = maskOpts || {};
+    const m = (params.algorithm !== 'ascii' && mult > 1) ? mult : 1;
+    const gw = Math.ceil(w / m), gh = Math.ceil(h / m);
+    const maskC = Dither().maskFromLuma(params.rgba, w, h, Object.assign({}, cfg, {
+      pre: params.pre, outputRange: params.outputRange, invert: params.invert
+    }));
+    const md = maskC.getContext('2d').getImageData(0, 0, w, h).data;
+    if (m === 1) {
+      const cellM = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) cellM[i] = md[i * 4] / 255;
+      return { gw: w, gh: h, mult: 1, centerKey: !!cfg.centerKey, cellM };
+    }
+    const cellM = new Float32Array(gw * gh);
+    if (cfg.centerKey) {
+      const ox = m >> 1, oy = m >> 1;
+      for (let cy = 0; cy < gh; cy++) {
+        const py = Math.min(h - 1, cy * m + oy);
+        for (let cx = 0; cx < gw; cx++) {
+          const px = Math.min(w - 1, cx * m + ox);
+          cellM[cy * gw + cx] = md[(py * w + px) * 4] / 255;
+        }
+      }
+    } else {
+      const cm = new Float64Array(gw * gh);
+      const cc = new Uint32Array(gw * gh);
+      for (let i = 0; i < w * h; i++) {
+        const j = (((i / w) | 0) / m | 0) * gw + ((i % w) / m | 0);
+        cm[j] += md[i * 4] / 255;
+        cc[j]++;
+      }
+      for (let j = 0; j < gw * gh; j++) {
+        if (cc[j]) cellM[j] = cm[j] / cc[j];
+      }
+    }
+    return { gw, gh, mult: m, centerKey: !!cfg.centerKey, cellM };
   }
 
   function crtInto(work, params, time, overrides, fx) {
@@ -161,6 +258,8 @@
     blendEcho,
     renderMaskOverlay,
     renderCore,
+    maskKeyCanvas,
+    maskCellMatrix,
     applyFrameEffects,
     renderFrame
   };

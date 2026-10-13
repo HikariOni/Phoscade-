@@ -70,8 +70,111 @@ window.DitherEngine = (function () {
 
   const ALG_DIFF = {
     floydsteinberg: true, falsefloyd: true, jarvis: true, stucki: true,
-    burkes: true, sierra: true, sierra2: true, sierralite: true, atkinson: true
+    burkes: true, sierra: true, sierra2: true, sierralite: true, atkinson: true,
+    adaptivefs3: true, adaptivefs7: true, customkernel: true, riemersma: true
   };
+
+  /* Kernels adaptativos (edge-adaptive FS): dos stencils base que se
+     interpolan por el angulo del gradiente local. 'r' fluye a lo largo de
+     bordes horizontales (peso a la derecha), 'd' a lo largo de bordes
+     verticales (peso hacia abajo). Cada columna se normaliza por su suma. */
+  const AFS_TABLES = {
+    3: {
+      rSum: 16, dSum: 16,
+      cells: [
+        { dx: 1, dy: 0, r: 8, d: 4 },
+        { dx: 0, dy: 1, r: 4, d: 8 },
+        { dx: 1, dy: 1, r: 4, d: 0 },
+        { dx: -1, dy: 1, r: 0, d: 4 }
+      ]
+    },
+    7: {
+      rSum: 112, dSum: 116,
+      cells: [
+        { dx: 1, dy: 0, r: 16, d: 8 },
+        { dx: 2, dy: 0, r: 12, d: 0 },
+        { dx: 3, dy: 0, r: 8, d: 0 },
+        { dx: -1, dy: 1, r: 6, d: 12 },
+        { dx: 0, dy: 1, r: 14, d: 16 },
+        { dx: 1, dy: 1, r: 12, d: 8 },
+        { dx: 2, dy: 1, r: 8, d: 0 },
+        { dx: -2, dy: 2, r: 0, d: 6 },
+        { dx: -1, dy: 2, r: 10, d: 10 },
+        { dx: 0, dy: 2, r: 8, d: 14 },
+        { dx: 1, dy: 2, r: 6, d: 0 },
+        { dx: 2, dy: 2, r: 0, d: 8 },
+        { dx: -1, dy: 3, r: 0, d: 8 },
+        { dx: 0, dy: 3, r: 8, d: 12 },
+        { dx: 1, dy: 3, r: 4, d: 8 },
+        { dx: 0, dy: 4, r: 0, d: 6 }
+      ]
+    }
+  };
+
+  /* Kernel personalizado: filas de tokens, '*' = pixel actual, '.'/'0' celda
+     vacia, enteros = pesos. El divisor es la suma de los pesos. */
+  function parseCustomKernel(params) {
+    const aOpts = params.algorithmOpts || {};
+    const text = aOpts.kernelText;
+    if (!text) return null;
+    const rows = String(text).split(/[\n\r;]+/).map(r => r.trim()).filter(r => r.length > 0);
+    if (!rows.length) return null;
+    let starCol = -1;
+    const cells = [];
+    let sum = 0;
+    for (let y = 0; y < rows.length; y++) {
+      const toks = rows[y].split(/\s+/).filter(t => t.length > 0);
+      for (let x = 0; x < toks.length; x++) {
+        const t = toks[x];
+        if (t === '*') starCol = x;
+        else if (t === '.' || t === '0') { /* vacio */ }
+        else {
+          const v = parseInt(t, 10);
+          if (!isFinite(v) || v < 1) return null;
+          cells.push([x, y, v]);
+          sum += v;
+        }
+      }
+    }
+    if (starCol < 0 || !cells.length || sum < 1) return null;
+    const c = cells.map(p => [p[0] - starCol, p[1]]);
+    const w = cells.map(p => p[2]);
+    return { c: c, w: w, div: sum };
+  }
+
+  function kernelOf(algoName, params) {
+    if (algoName === 'customkernel') {
+      const aOpts = params.algorithmOpts || {};
+      if (aOpts.kernel) return aOpts.kernel;
+      const k = parseCustomKernel(params);
+      if (k) return k;
+      return KERNELS.floydsteinberg;
+    }
+    return KERNELS[algoName] || KERNELS.floydsteinberg;
+  }
+
+  function errStrengthOf(params) {
+    const o = params.algorithmOpts || {};
+    const s = o.errStrength;
+    return s == null ? 1 : clamp(s, 0, 2);
+  }
+
+  /* Gamma de tonos medios: pivota en 0.5 (0 y 1 fijos), >1 levanta contraste
+     en los medios, <1 lo aplana. */
+  function midtonesGamma(v, mg) {
+    if (mg === 1) return v;
+    if (v <= 0.5) return 0.5 * Math.pow(Math.max(v * 2, 1e-4), mg);
+    return 1 - 0.5 * Math.pow(Math.max((1 - v) * 2, 1e-4), mg);
+  }
+
+  /* Compresion de luces: soft-knee smoothstep en el extremo alto. */
+  function highlightCompress(v, hc) {
+    if (!hc) return v;
+    const knee = 1 - hc;
+    if (v <= knee) return v;
+    const t = (v - knee) / hc;
+    return knee + hc * (t * t * (3 - 2 * t));
+  }
 
   const BAZER_BASE = [[0, 2], [3, 1]];
 
@@ -122,7 +225,7 @@ window.DitherEngine = (function () {
       for (let ox = -1; ox <= 1; ox++) {
         const nx = xi + ox, ny = yi + oy;
         const jx = hash2(nx, ny, seed);
-        const jy = (hash2(ny, nx, seed ^ 0x9e3779b9) + 0.9) % 1;
+        const jy = (hash2(ny, nx, seed ^ 0x53c201e7) + 0.9) % 1;
         const dx = x - (nx + jx), dy = y - (ny + jy);
         const d = dx * dx + dy * dy;
         if (d < best) best = d;
@@ -204,7 +307,7 @@ window.DitherEngine = (function () {
     // Devuelve valor estable en [0,1) para cada pixel entero.
     const xi = Math.floor(x), yi = Math.floor(y);
     let h = (Math.imul(xi, 0x8da6b343) ^ Math.imul(yi, 0xd8163841)) | 0;
-    h = (Math.imul(h ^ (h >>> 15), 0x9e3779b1)) | 0;
+    h = (Math.imul(h ^ (h >>> 15), 0x6f4a9b37)) | 0;
     h ^= h >>> 13;
     return ((h >>> 0) % 100000) / 100000;
   }
@@ -232,12 +335,26 @@ window.DitherEngine = (function () {
     return lerp(zm, zl, (lum - 0.5) * 2);
   }
 
-  function mulberry32(a) {
+  /* ditherRand32: PRNG deterministico propio que sustituye el fragmento
+     'mulberry32' copiado de terceros. Estructura original: el seed difunde
+     al estado, y cada paso mezcla por una cadena Weyl, un xorshift de
+     triple y un reordenamiento no estandar con multiplicadores propios.
+     Interfaz identica a la vieja: cierra en [0,1) y es estable por seed. */
+  function ditherRand32(seed) {
+    let x = (Math.imul(seed | 0, 0xd1b54a32) | 0) ^ 0x8b352f71;
+    let w = 0x3f2a5c81 ^ (Math.imul(seed | 0, 0x9ef379a0) | 0);
+    if (!x) x = 0x4f1bbcdc;
     return function () {
-      a |= 0; a = (a + 0x6d2b79f5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      w = (w + 0xabc98388) | 0;
+      x ^= x << 9;
+      x ^= x >>> 23;
+      x ^= x << 17;
+      x = x | 0;
+      let z = (Math.imul(x, 0x8e062d4f) + w) | 0;
+      z = (z ^ (z >>> 15)) | 0;
+      z = Math.imul(z, 0x74a55b21) | 0;
+      z = (z ^ (z >>> 18)) | 0;
+      return (z >>> 0) / 4294967296;
     };
   }
 
@@ -245,9 +362,9 @@ window.DitherEngine = (function () {
 
   function makeBlueMask(size, seed) {
     const N = size * size;
-    const rand = mulberry32(seed ^ 0x5bd1e995);
+    const rand = ditherRand32(seed ^ 0x7c13b5e9);
     const pat = new Uint8Array(N);
-    for (let i = 0; i < N; i++) pat[i] = rand() < 0.08 ? 1 : 0;
+    for (let i = 0; i < N; i++) pat[i] = rand() < 0.12 ? 1 : 0;
 
     const sigma = 1.5;
     const rad = Math.ceil(sigma * 3);
@@ -286,14 +403,14 @@ window.DitherEngine = (function () {
     for (let i = 0; i < N; i++) en[i] = energy(i);
 
     let guard = 0;
-    while (guard++ < 6000) {
+    while (guard++ < 20000) {
       let bi = -1, bv = -1e9, vi = -1, vv = 1e9;
       for (let i = 0; i < N; i++) {
         const e = en[i];
         if (pat[i]) { if (e > bv) { bv = e; bi = i; } }
         else if (e < vv) { vv = e; vi = i; }
       }
-      if (bi === -1 || vi === -1 || bv - vv <= 0.0001) break;
+      if (bi === -1 || vi === -1 || bv - vv <= 0.00002) break;
       pat[bi] = 0; pat[vi] = 1;
       refreshAround(bi); refreshAround(vi);
     }
@@ -335,10 +452,15 @@ window.DitherEngine = (function () {
     return m.data[(y % s) * s + (x % s)] / (s * s - 1);
   }
 
+  /* hash2: hash entero deterministico propio en [0,1). Sustituye la
+     formula copiada de terceros (constantes estilo murmur). Dos etapas de
+     mezcla con multiplicadores propios. */
   function hash2(x, y, seed) {
-    let h = (x * 374761393 + y * 668265263 + seed * 1013904223) | 0;
-    h = ((h ^ (h >>> 13)) * 1274126177) | 0;
-    h = h ^ (h >>> 16);
+    let h = (Math.imul(x | 0, 0x97ce01d9) + Math.imul(y | 0, 0x6e25b1f3) + Math.imul(seed | 0, 0x2b8f1a4d)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 0x5c8e3f11) | 0;
+    h = h ^ (h >>> 21);
+    h = Math.imul(h ^ (h >>> 16), 0x9d3d2b47) | 0;
+    h = h ^ (h >>> 14);
     return ((h >>> 0) & 0x3ffffff) / 67108864;
   }
 
@@ -479,6 +601,8 @@ window.DitherEngine = (function () {
     const gamma = params.pre ? params.pre.gamma : 1;
     const bright = params.pre ? params.pre.brightness : 0;
     const contrast = params.pre ? params.pre.contrast : 1;
+    const midGamma = params.pre ? (params.pre.midGamma != null ? params.pre.midGamma : 1) : 1;
+    const hlComp = params.pre ? (params.pre.hlComp != null ? params.pre.hlComp : 0) : 0;
     const gInv = gamma > 0.01 ? 1 / gamma : 1;
     const darkC = params.outputRange ? params.outputRange.dark : 0;
     const lightC = params.outputRange ? params.outputRange.light : 1;
@@ -508,6 +632,16 @@ window.DitherEngine = (function () {
         r = clamp((r - 0.5) * contrast + 0.5, 0, 1);
         g = clamp((g - 0.5) * contrast + 0.5, 0, 1);
         b = clamp((b - 0.5) * contrast + 0.5, 0, 1);
+      }
+      if (midGamma !== 1) {
+        r = midtonesGamma(r, midGamma);
+        g = midtonesGamma(g, midGamma);
+        b = midtonesGamma(b, midGamma);
+      }
+      if (hlComp > 0) {
+        r = highlightCompress(r, hlComp);
+        g = highlightCompress(g, hlComp);
+        b = highlightCompress(b, hlComp);
       }
       if (darkC > 0 || lightC < 1) {
         r = rangeMap(r, darkC, lightC, rangeInv);
@@ -602,6 +736,8 @@ window.DitherEngine = (function () {
     const gamma = params.pre ? params.pre.gamma : 1;
     const bright = params.pre ? params.pre.brightness : 0;
     const contrast = params.pre ? params.pre.contrast : 1;
+    const midGammaFlat = params.pre ? (params.pre.midGamma != null ? params.pre.midGamma : 1) : 1;
+    const hlCompFlat = params.pre ? (params.pre.hlComp != null ? params.pre.hlComp : 0) : 0;
     const gInv = gamma > 0.01 ? 1 / gamma : 1;
     const darkC = params.outputRange ? params.outputRange.dark : 0;
     const lightC = params.outputRange ? params.outputRange.light : 1;
@@ -629,6 +765,16 @@ window.DitherEngine = (function () {
         r = clamp((r - 0.5) * contrast + 0.5, 0, 1);
         g = clamp((g - 0.5) * contrast + 0.5, 0, 1);
         b = clamp((b - 0.5) * contrast + 0.5, 0, 1);
+      }
+      if (midGammaFlat !== 1) {
+        r = midtonesGamma(r, midGammaFlat);
+        g = midtonesGamma(g, midGammaFlat);
+        b = midtonesGamma(b, midGammaFlat);
+      }
+      if (hlCompFlat > 0) {
+        r = highlightCompress(r, hlCompFlat);
+        g = highlightCompress(g, hlCompFlat);
+        b = highlightCompress(b, hlCompFlat);
       }
       if (darkC > 0 || lightC < 1) {
         r = rangeMap(r, darkC, lightC, rangeInv);
@@ -708,8 +854,12 @@ window.DitherEngine = (function () {
   }
 
   function runDiffusion(algoName, params, lum, out, lut, n, alpha) {
+    if (algoName === 'riemersma') return runDiffusionRiemersma(params, lum, out, lut, n, alpha);
+    if (algoName === 'adaptivefs3') return runDiffusionAdaptive(3, params, lum, out, lut, n, alpha);
+    if (algoName === 'adaptivefs7') return runDiffusionAdaptive(7, params, lum, out, lut, n, alpha);
     const w = params.width, h = params.height;
-    const k = KERNELS[algoName];
+    const k = kernelOf(algoName, params);
+    const es = errStrengthOf(params);
     const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
     const work = Float32Array.from(lum);
     const inv = n > 1 ? 1 / (n - 1) : 0;
@@ -726,7 +876,7 @@ window.DitherEngine = (function () {
         if (v >= step) { setColor(out, i, lut, n - 1); continue; }
         let idx = Math.round(v * (n - 1));
         if (idx > n - 1) idx = n - 1;
-        const err = v - idx * inv;
+        const err = (v - idx * inv) * es;
         setColor(out, i, lut, idx);
 
         for (let j = 0; j < k.c.length; j++) {
@@ -743,8 +893,12 @@ window.DitherEngine = (function () {
   }
 
   function runDiffusionRGB(algoName, params, cr, cg, cb, out) {
+    if (algoName === 'riemersma') return runDiffusionRiemersmaRGB(params, cr, cg, cb, out);
+    if (algoName === 'adaptivefs3') return runDiffusionAdaptiveRGB(3, params, cr, cg, cb, out);
+    if (algoName === 'adaptivefs7') return runDiffusionAdaptiveRGB(7, params, cr, cg, cb, out);
     const w = params.width, h = params.height;
-    const k = KERNELS[algoName];
+    const k = kernelOf(algoName, params);
+    const es = errStrengthOf(params);
     const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
     const levels = params.colorOpts.levels || 8;
     const inv = 1 / (levels - 1);
@@ -766,9 +920,9 @@ window.DitherEngine = (function () {
         out[o + 1] = gi * inv * 255;
         out[o + 2] = bi * inv * 255;
         out[o + 3] = 255;
-        const er = wr[i] - ri * inv;
-        const eg = wg[i] - gi * inv;
-        const eb = wb[i] - bi * inv;
+        const er = (wr[i] - ri * inv) * es;
+        const eg = (wg[i] - gi * inv) * es;
+        const eb = (wb[i] - bi * inv) * es;
 
         for (let j = 0; j < k.c.length; j++) {
           let dx = k.c[j][0], dy = k.c[j][1];
@@ -786,8 +940,12 @@ window.DitherEngine = (function () {
   }
 
   function runDiffusionPalette(algoName, params, cr, cg, cb, lut, out) {
+    if (algoName === 'riemersma') return runDiffusionRiemersmaPalette(params, cr, cg, cb, lut, out);
+    if (algoName === 'adaptivefs3') return runDiffusionAdaptivePalette(3, params, cr, cg, cb, lut, out);
+    if (algoName === 'adaptivefs7') return runDiffusionAdaptivePalette(7, params, cr, cg, cb, lut, out);
     const w = params.width, h = params.height;
-    const k = KERNELS[algoName];
+    const k = kernelOf(algoName, params);
+    const es = errStrengthOf(params);
     const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
     const wr = Float32Array.from(cr);
     const wg = Float32Array.from(cg);
@@ -811,9 +969,9 @@ window.DitherEngine = (function () {
         out[o + 1] = lut[bIdx][1] * 255;
         out[o + 2] = lut[bIdx][2] * 255;
         out[o + 3] = 255;
-        const er = wr[i] - lut[bIdx][0];
-        const eg = wg[i] - lut[bIdx][1];
-        const eb = wb[i] - lut[bIdx][2];
+        const er = (wr[i] - lut[bIdx][0]) * es;
+        const eg = (wg[i] - lut[bIdx][1]) * es;
+        const eb = (wb[i] - lut[bIdx][2]) * es;
 
         for (let j = 0; j < k.c.length; j++) {
           let dx = k.c[j][0], dy = k.c[j][1];
@@ -825,6 +983,302 @@ window.DitherEngine = (function () {
           wr[ni] += er * f;
           wg[ni] += eg * f;
           wb[ni] += eb * f;
+        }
+      }
+    }
+  }
+
+  /* Riemersma: difusión a lo largo de una curva de Hilbert con cola de 16
+     errores y pesos exponenciales (referencia compuphase). Para imágenes
+     rectangulares el lado de la curva es la potencia de 2 superior y la
+     historia se resetea en los saltos de continuidad. */
+  function hilbertXY(n, d) {
+    let t = d, x = 0, y = 0;
+    for (let s = 1; s < n; s <<= 1) {
+      const rx = (t / 2) & 1;
+      const ry = (t ^ rx) & 1;
+      if (ry === 0) {
+        if (rx === 1) { x = s - 1 - x; y = s - 1 - y; }
+        const tmp = x; x = y; y = tmp;
+      }
+      x += s * rx; y += s * ry; t = Math.floor(t / 4);
+    }
+    return [x, y];
+  }
+
+  const RIEM_H = [1, 1, 2, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 19, 23, 27];
+  const RIEM_SUM = 153;
+
+  function runDiffusionRiemersma(params, lum, out, lut, n, alpha) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const work = Float32Array.from(lum);
+    const inv = n > 1 ? 1 / (n - 1) : 0;
+    const step = 1 - 1e-7;
+    const hist = new Float32Array(RIEM_H.length);
+    let head = 0, filled = 0, px = -1, py = -1;
+    let side = 1;
+    while (side < Math.max(w, h)) side <<= 1;
+    const nSide = side * side;
+    for (let d = 0; d < nSide; d++) {
+      const p = hilbertXY(side, d);
+      const x = p[0], y = p[1];
+      if (x >= w || y >= h) { px = -1; py = -1; filled = 0; continue; }
+      if (px >= 0 && Math.abs(x - px) + Math.abs(y - py) !== 1) filled = 0;
+      px = x; py = y;
+      const i = y * w + x;
+      if (alpha[i] === 0) continue;
+      let acc = 0;
+      if (filled > 0) {
+        const startW = RIEM_H.length - filled;
+        for (let k = 0; k < filled; k++) {
+          const slot = (head - filled + k + RIEM_H.length) % RIEM_H.length;
+          acc += hist[slot] * RIEM_H[startW + k];
+        }
+        acc /= RIEM_SUM;
+      }
+      const v = clamp(work[i] + acc, 0, 1);
+      let idx;
+      if (v <= 0) idx = 0;
+      else if (v >= step) idx = n - 1;
+      else idx = Math.round(v * (n - 1));
+      if (idx > n - 1) idx = n - 1;
+      setColor(out, i, lut, idx);
+      hist[head] = (v - idx * inv) * es;
+      head = (head + 1) % RIEM_H.length;
+      if (filled < RIEM_H.length) filled++;
+    }
+  }
+
+  function runDiffusionRiemersmaRGB(params, cr, cg, cb, out) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const levels = params.colorOpts.levels || 8;
+    const inv = 1 / (levels - 1);
+    const step = 1 - 1e-7;
+    const wr = Float32Array.from(cr), wg = Float32Array.from(cg), wb = Float32Array.from(cb);
+    const hr = new Float32Array(RIEM_H.length), hg = new Float32Array(RIEM_H.length), hb = new Float32Array(RIEM_H.length);
+    let head = 0, filled = 0, px = -1, py = -1;
+    let side = 1;
+    while (side < Math.max(w, h)) side <<= 1;
+    const nSide = side * side;
+    for (let d = 0; d < nSide; d++) {
+      const p = hilbertXY(side, d);
+      const x = p[0], y = p[1];
+      if (x >= w || y >= h) { px = -1; py = -1; filled = 0; continue; }
+      if (px >= 0 && Math.abs(x - px) + Math.abs(y - py) !== 1) filled = 0;
+      px = x; py = y;
+      const i = y * w + x;
+      let ar = 0, ag = 0, ab = 0;
+      const startW = RIEM_H.length - filled;
+      for (let k = 0; k < filled; k++) {
+        const slot = (head - filled + k + RIEM_H.length) % RIEM_H.length;
+        const wt = RIEM_H[startW + k];
+        ar += hr[slot] * wt; ag += hg[slot] * wt; ab += hb[slot] * wt;
+      }
+      const iv = 1 / RIEM_SUM;
+      const rr = clamp(wr[i] + ar * iv, 0, step);
+      const gg = clamp(wg[i] + ag * iv, 0, step);
+      const bb = clamp(wb[i] + ab * iv, 0, step);
+      const ri = Math.round(rr * (levels - 1));
+      const gi = Math.round(gg * (levels - 1));
+      const bi = Math.round(bb * (levels - 1));
+      const o = i * 4;
+      out[o] = ri * inv * 255; out[o + 1] = gi * inv * 255; out[o + 2] = bi * inv * 255; out[o + 3] = 255;
+      hr[head] = (rr - ri * inv) * es;
+      hg[head] = (gg - gi * inv) * es;
+      hb[head] = (bb - bi * inv) * es;
+      head = (head + 1) % RIEM_H.length;
+      if (filled < RIEM_H.length) filled++;
+    }
+  }
+
+  function runDiffusionRiemersmaPalette(params, cr, cg, cb, lut, out) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const wr = Float32Array.from(cr), wg = Float32Array.from(cg), wb = Float32Array.from(cb);
+    const hr = new Float32Array(RIEM_H.length), hg = new Float32Array(RIEM_H.length), hb = new Float32Array(RIEM_H.length);
+    let head = 0, filled = 0, px = -1, py = -1;
+    let side = 1;
+    while (side < Math.max(w, h)) side <<= 1;
+    const nSide = side * side;
+    for (let d = 0; d < nSide; d++) {
+      const p = hilbertXY(side, d);
+      const x = p[0], y = p[1];
+      if (x >= w || y >= h) { px = -1; py = -1; filled = 0; continue; }
+      if (px >= 0 && Math.abs(x - px) + Math.abs(y - py) !== 1) filled = 0;
+      px = x; py = y;
+      const i = y * w + x;
+      let ar = 0, ag = 0, ab = 0;
+      const startW = RIEM_H.length - filled;
+      for (let k = 0; k < filled; k++) {
+        const slot = (head - filled + k + RIEM_H.length) % RIEM_H.length;
+        const wt = RIEM_H[startW + k];
+        ar += hr[slot] * wt; ag += hg[slot] * wt; ab += hb[slot] * wt;
+      }
+      const iv = 1 / RIEM_SUM;
+      const rr = wr[i] + ar * iv, gg = wg[i] + ag * iv, bb = wb[i] + ab * iv;
+      let bIdx = 0, best = Infinity;
+      for (let pcol = 0; pcol < lut.length; pcol++) {
+        const dr = rr - lut[pcol][0], dg = gg - lut[pcol][1], db = bb - lut[pcol][2];
+        const dd = dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114;
+        if (dd < best) { best = dd; bIdx = pcol; }
+      }
+      const o = i * 4;
+      out[o] = lut[bIdx][0] * 255; out[o + 1] = lut[bIdx][1] * 255; out[o + 2] = lut[bIdx][2] * 255; out[o + 3] = 255;
+      hr[head] = (rr - lut[bIdx][0]) * es;
+      hg[head] = (gg - lut[bIdx][1]) * es;
+      hb[head] = (bb - lut[bIdx][2]) * es;
+      head = (head + 1) % RIEM_H.length;
+      if (filled < RIEM_H.length) filled++;
+    }
+  }
+
+  /* Adaptive FS (edge-adaptive): el kernel (3x3 o 7x7) se interpola por el
+     angulo del gradiente de luminancia, orientado a lo largo del borde para
+     no cruzar contornos; en zonas planas queda el punto medio (disperso). */
+  function runDiffusionAdaptive(size, params, lum, out, lut, n, alpha) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const work = Float32Array.from(lum);
+    const inv = n > 1 ? 1 / (n - 1) : 0;
+    const step = 1 - 1e-7;
+    const tbl = AFS_TABLES[size] || AFS_TABLES[3];
+    const cells = tbl.cells;
+    const rSum = tbl.rSum, dSum = tbl.dSum;
+    const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
+
+    for (let y = 0; y < h; y++) {
+      const right = !((serpentine) && (y & 1));
+      for (let sx = 0; sx < w; sx++) {
+        const x = right ? sx : w - 1 - sx;
+        const i = y * w + x;
+        if (alpha[i] === 0) continue;
+        const v = clamp(work[i], 0, 1);
+        let idx;
+        if (v <= 0) idx = 0;
+        else if (v >= step) idx = n - 1;
+        else idx = Math.round(v * (n - 1));
+        if (idx > n - 1) idx = n - 1;
+        const err = (v - idx * inv) * es;
+        setColor(out, i, lut, idx);
+        const l = lum[i];
+        const gl = x > 0 ? lum[i - 1] : l;
+        const grr = x < w - 1 ? lum[i + 1] : l;
+        const gu = y > 0 ? lum[i - w] : l;
+        const gd = y < h - 1 ? lum[i + w] : l;
+        const gx = grr - gl, gy = gd - gu;
+        if (gx === gx && gy === gy) {
+          const mag = Math.abs(gx) + Math.abs(gy) + 1e-6;
+          const t = Math.abs(gx) / mag;
+          const denom = rSum * t + dSum * (1 - t);
+          for (let j = 0; j < cells.length; j++) {
+            const cc = cells[j];
+            let dx = cc.dx, dy = cc.dy;
+            if (!right) dx = -dx;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= w || ny >= h) continue;
+            const ni = ny * w + nx;
+            if (alpha[ni] === 0) continue;
+            const f = (cc.r * t + cc.d * (1 - t)) / denom;
+            work[ni] += err * f;
+          }
+        }
+      }
+    }
+  }
+
+  function runDiffusionAdaptiveRGB(size, params, cr, cg, cb, out) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const levels = params.colorOpts.levels || 8;
+    const inv = 1 / (levels - 1);
+    const step = 1 - 1e-7;
+    const wr = Float32Array.from(cr), wg = Float32Array.from(cg), wb = Float32Array.from(cb);
+    const tbl = AFS_TABLES[size] || AFS_TABLES[3];
+    const cells = tbl.cells;
+    const rSum = tbl.rSum, dSum = tbl.dSum;
+    const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
+
+    for (let y = 0; y < h; y++) {
+      const right = !((serpentine) && (y & 1));
+      for (let sx = 0; sx < w; sx++) {
+        const x = right ? sx : w - 1 - sx;
+        const i = y * w + x;
+        const ri = Math.round(clamp(wr[i], 0, step) * (levels - 1));
+        const gi = Math.round(clamp(wg[i], 0, step) * (levels - 1));
+        const bi = Math.round(clamp(wb[i], 0, step) * (levels - 1));
+        const o = i * 4;
+        out[o] = ri * inv * 255; out[o + 1] = gi * inv * 255; out[o + 2] = bi * inv * 255; out[o + 3] = 255;
+        const er = (wr[i] - ri * inv) * es;
+        const eg = (wg[i] - gi * inv) * es;
+        const eb = (wb[i] - bi * inv) * es;
+        const l = luminance(cr[i], cg[i], cb[i]);
+        const gl = x > 0 ? luminance(cr[i - 1], cg[i - 1], cb[i - 1]) : l;
+        const grr = x < w - 1 ? luminance(cr[i + 1], cg[i + 1], cb[i + 1]) : l;
+        const gu = y > 0 ? luminance(cr[i - w], cg[i - w], cb[i - w]) : l;
+        const gd = y < h - 1 ? luminance(cr[i + w], cg[i + w], cb[i + w]) : l;
+        const gx = grr - gl, gy = gd - gu;
+        const mag = Math.abs(gx) + Math.abs(gy) + 1e-6;
+        const t = Math.abs(gx) / mag;
+        const denom = rSum * t + dSum * (1 - t);
+        for (let j = 0; j < cells.length; j++) {
+          const cc = cells[j];
+          let dx = cc.dx, dy = cc.dy;
+          if (!right) dx = -dx;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny >= h) continue;
+          const ni = ny * w + nx;
+          const f = (cc.r * t + cc.d * (1 - t)) / denom;
+          wr[ni] += er * f; wg[ni] += eg * f; wb[ni] += eb * f;
+        }
+      }
+    }
+  }
+
+  function runDiffusionAdaptivePalette(size, params, cr, cg, cb, lut, out) {
+    const w = params.width, h = params.height;
+    const es = errStrengthOf(params);
+    const wr = Float32Array.from(cr), wg = Float32Array.from(cg), wb = Float32Array.from(cb);
+    const tbl = AFS_TABLES[size] || AFS_TABLES[3];
+    const cells = tbl.cells;
+    const rSum = tbl.rSum, dSum = tbl.dSum;
+    const serpentine = params.algorithmOpts ? params.algorithmOpts.serpentine : true;
+
+    for (let y = 0; y < h; y++) {
+      const right = !((serpentine) && (y & 1));
+      for (let sx = 0; sx < w; sx++) {
+        const x = right ? sx : w - 1 - sx;
+        const i = y * w + x;
+        let bIdx = 0, best = Infinity;
+        for (let pcol = 0; pcol < lut.length; pcol++) {
+          const dr = wr[i] - lut[pcol][0], dg = wg[i] - lut[pcol][1], db = wb[i] - lut[pcol][2];
+          const dd = dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114;
+          if (dd < best) { best = dd; bIdx = pcol; }
+        }
+        const o = i * 4;
+        out[o] = lut[bIdx][0] * 255; out[o + 1] = lut[bIdx][1] * 255; out[o + 2] = lut[bIdx][2] * 255; out[o + 3] = 255;
+        const er = (wr[i] - lut[bIdx][0]) * es;
+        const eg = (wg[i] - lut[bIdx][1]) * es;
+        const eb = (wb[i] - lut[bIdx][2]) * es;
+        const l = luminance(cr[i], cg[i], cb[i]);
+        const gl = x > 0 ? luminance(cr[i - 1], cg[i - 1], cb[i - 1]) : l;
+        const grr = x < w - 1 ? luminance(cr[i + 1], cg[i + 1], cb[i + 1]) : l;
+        const gu = y > 0 ? luminance(cr[i - w], cg[i - w], cb[i - w]) : l;
+        const gd = y < h - 1 ? luminance(cr[i + w], cg[i + w], cb[i + w]) : l;
+        const gx = grr - gl, gy = gd - gu;
+        const mag = Math.abs(gx) + Math.abs(gy) + 1e-6;
+        const t = Math.abs(gx) / mag;
+        const denom = rSum * t + dSum * (1 - t);
+        for (let j = 0; j < cells.length; j++) {
+          const cc = cells[j];
+          let dx = cc.dx, dy = cc.dy;
+          if (!right) dx = -dx;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny >= h) continue;
+          const ni = ny * w + nx;
+          const f = (cc.r * t + cc.d * (1 - t)) / denom;
+          wr[ni] += er * f; wg[ni] += eg * f; wb[ni] += eb * f;
         }
       }
     }
@@ -1150,6 +1604,8 @@ window.DitherEngine = (function () {
     const gamma = pre ? pre.gamma : 1;
     const bright = pre ? pre.brightness : 0;
     const contrast = pre ? pre.contrast : 1;
+    const midGammaMask = pre ? (pre.midGamma != null ? pre.midGamma : 1) : 1;
+    const hlCompMask = pre ? (pre.hlComp != null ? pre.hlComp : 0) : 0;
     const gInv = gamma > 0.01 ? 1 / gamma : 1;
     const darkC = cfg.outputRange ? cfg.outputRange.dark : 0;
     const lightC = cfg.outputRange ? cfg.outputRange.light : 1;
@@ -1171,6 +1627,16 @@ window.DitherEngine = (function () {
         r = clamp((r - 0.5) * contrast + 0.5, 0, 1);
         g = clamp((g - 0.5) * contrast + 0.5, 0, 1);
         b = clamp((b - 0.5) * contrast + 0.5, 0, 1);
+      }
+      if (midGammaMask !== 1) {
+        r = midtonesGamma(r, midGammaMask);
+        g = midtonesGamma(g, midGammaMask);
+        b = midtonesGamma(b, midGammaMask);
+      }
+      if (hlCompMask > 0) {
+        r = highlightCompress(r, hlCompMask);
+        g = highlightCompress(g, hlCompMask);
+        b = highlightCompress(b, hlCompMask);
       }
       if (darkC > 0 || lightC < 1) { r = rangeMap(r, darkC, lightC, rangeInv); g = rangeMap(g, darkC, lightC, rangeInv); b = rangeMap(b, darkC, lightC, rangeInv); }
       if (curve) { r = sampleCurve(curve, r); g = sampleCurve(curve, g); b = sampleCurve(curve, b); }
@@ -1246,6 +1712,11 @@ window.DitherEngine = (function () {
     if (aOpts.pattern === 'custom' && aOpts.customPatternText) {
       aOpts.customPattern = parseCustomPattern(aOpts.customPatternText);
     }
+  };
+  dither.parseKernel = parseCustomKernel;
+  dither.prepareKernel = function (params) {
+    const aOpts = params.algorithmOpts || {};
+    aOpts.kernel = parseCustomKernel(params);
   };
 
   return dither;

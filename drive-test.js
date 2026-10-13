@@ -77,7 +77,7 @@ const DRIVE = `(async function () {
   };
 
   /* 1) matrix scan: must be error-free now */
-  const ALGS = ['floydsteinberg','falsefloyd','jarvis','stucki','burkes','sierra','sierra2','sierralite','atkinson','bayer','modulation','bitmappattern','ascii'];
+  const ALGS = ['floydsteinberg','falsefloyd','jarvis','stucki','burkes','sierra','sierra2','sierralite','atkinson','adaptivefs3','adaptivefs7','customkernel','riemersma','bayer','modulation','bitmappattern','ascii'];
   const MODS = ['white','blue','bayer','value','perlin','cellular','knoll','ign'];
   await setSel('algoSelect', 'modulation');
   for (const mt of MODS) {
@@ -278,6 +278,22 @@ const DRIVE = `(async function () {
     out.png = { ok: pb.type === 'image/png' && pb.size > 100 && di.ok, size: pb.size };
   } catch (e) { out.png = { ok: false, err: e.message }; }
 
+  /* 4b) secuencia PNG: seqPayload genera app.nnnn.png con bytes PNG validos */
+  try {
+    const mk = (bg) => {
+      const c = document.createElement('canvas'); c.width = 16; c.height = 16;
+      const x = c.getContext('2d'); x.fillStyle = bg; x.fillRect(0, 0, 16, 16);
+      return c;
+    };
+    const pl = await window.Export.seqPayload([mk('#ff0000'), mk('#00ff00')], 'seq-test', null);
+    const PNG_HDR = [0x89, 0x50, 0x4e, 0x47];
+    const good = pl.items.length === 2 && pl.items[0].index === 1 && pl.items[1].index === 2 &&
+      pl.items.every((it) => it.bytes instanceof Uint8Array && it.bytes.length > 100 &&
+        it.bytes[0] === PNG_HDR[0] && it.bytes[1] === PNG_HDR[1] && it.bytes[2] === PNG_HDR[2] && it.bytes[3] === PNG_HDR[3]) &&
+      pl.name === 'seq-test';
+    out.seq = { ok: !!good, frames: pl.items.length, name: pl.name, sizes: pl.items.map((i) => i.bytes.length) };
+  } catch (e) { out.seq = { ok: false, err: e.message }; }
+
   /* 5) blue noise tile quality: permutation, dispersion vs white, tileability */
   function solidParams(mt) {
     const a = new Uint8ClampedArray(64 * 64 * 4);
@@ -353,6 +369,61 @@ const DRIVE = `(async function () {
   $('crtBloomTint').dispatchEvent(new Event('input'));
   await sleep(200);
 
+  /* 6b2) sincronismo real: el pitch deriva de las lineas activas del
+     estandar (PAL 576 / NTSC 480 / PANTALLA 768) y el interlace de dos
+     campos altera la salida. Se prueba a nivel de motor (sin UI, time
+     entero = deterministico) para evitar flakiness del reloj. */
+  const crtApply = window.CRT;
+  const mkSolid = (h, rgb) => {
+    const c = document.createElement('canvas'); c.width = 64; c.height = h;
+    const x = c.getContext('2d'); x.fillStyle = rgb; x.fillRect(0, 0, 64, h);
+    return c;
+  };
+  const crtFree = (type, h, time, interlace) => {
+    const c = mkSolid(h, '#f0f0f0');
+    crtApply(c, { enabled: true, type, mask: 'none', scanlines: 0.85, phosphor: 0, frame: 0, hue: 0, curvature: 0, eyefish: 0, eyefishRadius: 1, conv: 0, roll: 0, bloom: 0, trail: 0, raster: 0, flicker: 0, dropout: 0, echo: 0, vibrance: 0, saturation: 1, interlace }, time);
+    const d = c.getContext('2d').getImageData(0, 0, 64, h).data;
+    let hh = 0x9e3779b1;
+    for (let i = 0; i < d.length; i += 4) hh = Math.imul(hh ^ (d[i] * 167 + d[i + 1] * 13 + d[i + 2] * 3), 0x6f4a9b37) | 0;
+    return hh >>> 0;
+  };
+  fxRes.crtSignalModel = crtFree('pal', 1200, 3, true) !== crtFree('ntsc', 1200, 3, true);
+  fxRes.crtSignalPlano = crtFree('pal', 1200, 3, true) !== crtFree('rect', 1200, 3, true);
+  fxRes.crtFieldParity = crtFree('pal', 144, 10, true) !== crtFree('pal', 144, 11, true);
+  fxRes.crtFieldOff = crtFree('pal', 144, 10, false) !== crtFree('pal', 144, 10, true);
+
+  const curType = $('crtType') ? $('crtType').value : 'rect';
+  const interOrig = $('crtInterlace') ? $('crtInterlace').checked : true;
+  $('crtType').value = 'pal';
+  $('crtType').dispatchEvent(new Event('change'));
+  await sleep(300);
+  let syncText = '';
+  if ($('crtSyncInfo')) syncText = $('crtSyncInfo').textContent;
+  const hPal = snap2();
+  $('crtType').value = 'ntsc';
+  $('crtType').dispatchEvent(new Event('change'));
+  await sleep(300);
+  const hNtsc = snap2();
+  const syncOk = /PAL/.test(syncText) && /576/.test(syncText) && /25 fps/.test(syncText) && /pitch/.test(syncText);
+  fxRes.crtSyncInfo = syncOk;
+  fxRes.crtSyncDbg = syncText;
+  $('crtType').value = 'pal';
+  $('crtType').dispatchEvent(new Event('change'));
+  await sleep(260);
+  $('crtInterlace').checked = false;
+  $('crtInterlace').dispatchEvent(new Event('change'));
+  await sleep(280);
+  const hInterOff = snap2();
+  $('crtInterlace').checked = true;
+  $('crtInterlace').dispatchEvent(new Event('change'));
+  await sleep(280);
+  fxRes.crtInterlaceAffects = hInterOff !== snap2();
+  $('crtType').value = curType;
+  $('crtType').dispatchEvent(new Event('change'));
+  $('crtInterlace').checked = interOrig;
+  $('crtInterlace').dispatchEvent(new Event('change'));
+  await sleep(200);
+
   clearToast();
   setChk('crtCheck', 0);
   await setSel('algoSelect', 'floydsteinberg');
@@ -363,7 +434,9 @@ const DRIVE = `(async function () {
   const eMask = snap2();
   setChk('maskCheck', 0);
   await sleep(180);
-  fxRes.maskAffects = eNoMask !== eMask;
+  /* La mascara selectiva es un pipeline de material en movimiento: sobre
+     imagen fija (sourceKind 'image') NO debe afectar el render. */
+  fxRes.maskSkippedOnStill = eNoMask === eMask;
 
   /* 6c) nueva ronda: UI de exportacion + niveles de degradado + ruido animado */
   const stillBtns = Array.prototype.slice.call(document.querySelectorAll('.exp-still'));
@@ -474,14 +547,265 @@ const DRIVE = `(async function () {
   setChk('animCheck', 0);
   await sleep(150);
 
+  /* 6g) la mascara selectiva SI afecta cuando la fuente es material en
+     movimiento (aqui: GIF animado importado, sourceKind 'gif'):
+     (a) la app la habilito en el motor (maskOpts.enabled === true) y
+     (b) el overlay de composicion cambia bytes (diffPixels > 0). */
+  if (gifSrcOk) {
+    setChk('animCheck', 0);
+    await sleep(220);
+    window.__maskCalls = [];
+    const _rc = window.StudioEngine.renderCore;
+    window.StudioEngine.renderCore = (p, mo) => {
+      window.__maskCalls.push({ enabled: !!mo.enabled, source: mo.source, sourceKind: mo.sourceKind, algo: p.algorithm, cm: p.colorMode });
+      return _rc(p, mo);
+    };
+    await setSel('maskSource', 'medios');
+    setRange('maskThresh', 50); setRange('maskSmooth', 25); setRange('maskOpacity', 40);
+    setChk('maskCheck', 1);
+    await sleep(340);
+    const dbgOn = { chk: $('maskCheck').checked, src: $('animSource').value, anim: $('animCheck').checked, err: realError() };
+    setChk('maskCheck', 0);
+    await sleep(240);
+    window.StudioEngine.renderCore = _rc;
+    const reachedEnabled = window.__maskCalls.some((c) => c.enabled);
+    fxRes.maskCalls = window.__maskCalls;
+    const engineProbe = (() => {
+      const W = 48, H = 48;
+      const rb = new Uint8ClampedArray(W * H * 4);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const o = (y * W + x) * 4;
+        const black = x < 10 && y >= 10 && y < 20;
+        rb[o] = black ? 0 : 255; rb[o + 1] = 0; rb[o + 2] = 0; rb[o + 3] = 255;
+      }
+      const pp = { width: W, height: H, rgba: rb, algorithm: 'modulation', algorithmOpts: { mult: 1 }, colorMode: 'tritone', colorOpts: { c1: [0, 0, 0], c2: [1, 1, 1], c3: [0, 0.5, 1] }, outputRange: { dark: 0, light: 1 }, invert: false };
+      const se = window.StudioEngine;
+      const a = se.renderCore(pp, { enabled: true, source: 'sombra', threshold: 50, smooth: 25, opacity: 100, bw: true });
+      const b = se.renderCore(pp, { enabled: false });
+      const ad = a.getContext('2d').getImageData(0, 0, W, H).data;
+      const bd = b.getContext('2d').getImageData(0, 0, W, H).data;
+      let diff = 0;
+      for (let i = 0; i < ad.length; i += 4) { if (ad[i] !== bd[i] || ad[i + 1] !== bd[i + 1] || ad[i + 2] !== bd[i + 2]) diff++; }
+      return { diffPixels: diff, reachedEnabled, err: realError() };
+    })();
+    fxRes.engineProbe = engineProbe;
+    fxRes.maskAffectsMotion = gifSrcOk && reachedEnabled && engineProbe.diffPixels > 0;
+    setRange('maskOpacity', 100); setRange('maskThresh', 50); setRange('maskSmooth', 25);
+    await setSel('maskSource', 'brillo');
+  } else {
+    fxRes.maskAffectsMotion = false;
+  }
+
+  /* 6h) Q.A. de alineacion del matte a la rejilla de celdas (mult>1):
+     prueba constructiva de la seccion A. Con mult>1 la clave se muestrea por
+     celda y se expande a bloques, de modo que la sustitucion del overlay es
+     por celda entera:
+       (A) las celdas con sustitucion (delta vs capa plana) son un PREFIJO
+           contiguo [0..k) en todas las filas: el borde del overlay cae en un
+           limite de celda, nunca a media celda;
+       (B) las celdas interiores del prefijo (sustitucion completa) son
+           BYTE-UNIFORMES (grano estampado, sin invasion por pixel); solo la
+           celda de borde puede ser mezcla (m parcial);
+       (C) con mult=1 la clave queda por pixel (granularidad contraria,
+           discriminador del fix). */
+  fxRes.maskAlign = (() => {
+    const W = 64, H = 48;
+    const mkRamp = () => {
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d');
+      const lg = x.createLinearGradient(0, 0, W, 0);
+      lg.addColorStop(0, '#000000'); lg.addColorStop(0.5, '#808080'); lg.addColorStop(1, '#ffffff');
+      x.fillStyle = lg; x.fillRect(0, 0, W, H);
+      return x.getImageData(0, 0, W, H).data;
+    };
+    const flatRamp = (() => {
+      const r = new Float32Array(256 * 3);
+      for (let i = 0; i <= 255; i++) { const t = i / 255; r[i * 3] = t; r[i * 3 + 1] = t; r[i * 3 + 2] = t; }
+      return r;
+    })();
+    const base = (mult) => ({
+      width: W, height: H, rgba: mkRamp(),
+      algorithm: 'modulation',
+      algorithmOpts: { modType: 'blue', seed: 7, noiseScale: 4, interp: false, modBands: 5, modRipple: 25, modStrength: 0.8, modZones: { dark: 0.7, mid: 1, light: 0.35 }, mult: mult },
+      colorMode: 'gradient', colorOpts: { ramp: flatRamp, levels: 64 },
+      pre: { brightness: 0, contrast: 1, gamma: 1, curve: null },
+      outputRange: { dark: 0, light: 1 }, invert: false, transparent: { enabled: false }
+    });
+    const mOpts = (opacity, centerKey) => ({ enabled: true, source: 'sombra', threshold: 55, smooth: 0, opacity: opacity, centerKey: !!centerKey });
+    const se = window.StudioEngine;
+    const renderM = (mult, opacity, centerKey) => {
+      const p = base(mult);
+      DitherEngine.preparePattern(p);
+      return se.renderMaskOverlay(p, mOpts(opacity, centerKey));
+    };
+    const dataOf = (cv) => cv.getContext('2d').getImageData(0, 0, W, H).data;
+    const mult = 8, gw = Math.ceil(W / mult), gh = Math.ceil(H / mult);
+    const d = dataOf(renderM(mult, 100));
+    const bn = dataOf(renderM(mult, 0));
+    const m1 = dataOf(renderM(1, 100));
+    const dC = dataOf(renderM(mult, 100, true));
+
+    const anyDelta = (data, cx, cy) => {
+      const x0 = cx * mult, x1 = Math.min(W, x0 + mult);
+      const y0 = cy * mult, y1 = Math.min(H, y0 + mult);
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const o = (y * W + x) * 4;
+          const dl = Math.abs(data[o] - bn[o]) + Math.abs(data[o + 1] - bn[o + 1]) + Math.abs(data[o + 2] - bn[o + 2]);
+          if (dl > 2) return true;
+        }
+      }
+      return false;
+    };
+    const cellUniform = (data, cx, cy) => {
+      const x0 = cx * mult, x1 = Math.min(W, x0 + mult);
+      const y0 = cy * mult, y1 = Math.min(H, y0 + mult);
+      const o = (y0 * W + x0) * 4, r = data[o], g = data[o + 1], b = data[o + 2];
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const q = (y * W + x) * 4;
+        if (data[q] !== r || data[q + 1] !== g || data[q + 2] !== b) return false;
+      }
+      return true;
+    };
+
+    const statsOf = (data) => {
+      let prefix = true, interiorUniform = true, kRow = null, sameK = true;
+      for (let cy = 0; cy < gh; cy++) {
+        const k = [];
+        for (let cx = 0; cx < gw; cx++) if (anyDelta(data, cx, cy)) k.push(cx);
+        const isPrefix = k.length > 0 && k.length < gw && k.every((v, i) => v === i);
+        if (!isPrefix) prefix = false;
+        if (kRow == null) kRow = k.length; else if (k.length !== kRow) sameK = false;
+        for (let cx = 0; cx < k.length; cx++) {
+          if (cx < k.length - 1 && !cellUniform(data, cx, cy)) interiorUniform = false;
+        }
+      }
+      return { prefix, interiorUniform, kRow, sameK };
+    };
+    const st = statsOf(d);
+    const stC = statsOf(dC);
+
+    let perPxVaries = false;
+    for (let cy = 0; cy < gh && !perPxVaries; cy++) for (let cx = 0; cx < gw; cx++) {
+      const x0 = cx * mult, x1 = Math.min(W, x0 + mult);
+      const y0 = cy * mult, y1 = Math.min(H, y0 + mult);
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const o = (y * W + x) * 4;
+          if (o >= 4 && (m1[o] !== m1[o - 4] || m1[o + 1] !== m1[o - 3] || m1[o + 2] !== m1[o - 2])) { perPxVaries = true; break; }
+        }
+        if (perPxVaries) break;
+      }
+      if (perPxVaries) break;
+    }
+
+    /* Borde duro por centro de celda: con una clave binaria (blanco puro a la
+       izquierda de x=30, negro a la derecha) y umbral 50%, el centro de cada
+       celda cae fuera de la banda de blur, asi que la matriz por celda queda
+       {0,1} exacta; la media (default) deja al menos una celda parcial de
+       borde. Ese contraste ES el discriminador del fix. */
+    const mkBin = () => {
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d');
+      x.fillStyle = '#ffffff'; x.fillRect(0, 0, 30, H);
+      x.fillStyle = '#000000'; x.fillRect(30, 0, W - 30, H);
+      return x.getImageData(0, 0, W, H).data;
+    };
+    const binParam = Object.assign({}, base(mult), { rgba: mkBin() });
+    const matC = se.maskCellMatrix(binParam, mOpts(100, true), mult);
+    const matM = se.maskCellMatrix(binParam, mOpts(100, false), mult);
+    const hardEdgeBinary = Array.from(matC.cellM).every(v => v === 0 || v === 1);
+    const softEdgeExists = Array.from(matM.cellM).some(v => v > 0.02 && v < 0.98);
+
+    return {
+      onEachRowSameK: st.sameK && stC.sameK,
+      onPrefix: st.prefix && stC.prefix,
+      onPrefillCells: stC.kRow,
+      interiorUniform: st.interiorUniform && stC.interiorUniform,
+      perPxVaries,
+      hardEdgeBinary,
+      softEdgeExists,
+      cellPx: mult,
+      ok: st.sameK && st.prefix && stC.sameK && stC.prefix && st.interiorUniform && stC.interiorUniform &&
+          perPxVaries && !!stC.kRow && stC.kRow >= 1 && stC.kRow < gw && hardEdgeBinary && softEdgeExists
+    };
+  })();
+
+  /* Reel look: al simular la carga de un video, DFXReel.apply() debe dejar el
+     modo de color en "Degradado continuo" con paradas negro->blanco. */
+  fxRes.reelLook = (() => {
+    const r = {};
+    try {
+      const hook = window.DFXReel;
+      const cm = document.getElementById('colorMode');
+      if (!hook || !cm) { r.ok = false; r.reason = 'sin hook o sin colorMode'; return r; }
+      const before = cm.value;
+      cm.value = 'bw';
+      cm.dispatchEvent(new Event('change'));
+      hook.apply();
+      const read = () => {
+        const s = document.getElementById('gradStops');
+        const colors = s ? Array.from(s.querySelectorAll('input[type="color"]')).map(i => i.value) : [];
+        const palUse = document.getElementById('palUse');
+        return {
+          colors,
+          modeOk: cm.value === 'palRueda',
+          palUseOk: !!palUse && palUse.value === 'wheel',
+          stopsOk: colors.length === 2 && colors.indexOf('#000000') !== -1 && colors.indexOf('#ffffff') !== -1
+        };
+      };
+      const a = read();
+      hook.apply();
+      const b = read();
+      r.wasChanged = before !== 'palRueda';
+      r.stops = a.colors;
+      r.idempotent = a.stopsOk && a.modeOk && a.palUseOk && b.stopsOk && b.modeOk && b.palUseOk;
+      r.ok = r.idempotent;
+    } catch (e) { r.ok = false; r.error = String(e); }
+    return r;
+  })();
+
+  /* Vista previa del matte: existen los widgets, el borde duro viene activado
+     por defecto, y maskKeyCanvas devuelve una clave utilizable (con zonas
+     blancas y negras). El toggle se deja como estaba al terminar para no
+     contaminar los checks siguientes. */
+  fxRes.maskPreview = (() => {
+    const r = {};
+    try {
+      const el = document.getElementById('maskPreview');
+      const elC = document.getElementById('maskCenter');
+      const boxes = document.querySelectorAll('#maskOpts input[type="checkbox"]');
+      r.widgets = !!el && !!elC && !!document.getElementById('maskOpts');
+      r.defaultsCenter = !!elC && elC.checked === true;
+      if (el) { el.checked = true; el.dispatchEvent(new Event('change')); }
+      if (elC) { elC.checked = true; elC.dispatchEvent(new Event('change')); }
+      const W = 48, H = 32;
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d');
+      const lg = x.createLinearGradient(0, 0, W, 0);
+      lg.addColorStop(0, '#000000'); lg.addColorStop(1, '#ffffff');
+      x.fillStyle = lg; x.fillRect(0, 0, W, H);
+      const params = { width: W, height: H, rgba: x.getImageData(0, 0, W, H).data, pre: null, outputRange: { dark: 0, light: 1 }, invert: false };
+      const keyC = window.StudioEngine.maskKeyCanvas(params, { enabled: true, source: 'brillo', threshold: 50, smooth: 0, opacity: 100, centerKey: true, preview: false });
+      const kd = keyC.getContext('2d').getImageData(0, 0, W, H).data;
+      let mn = 255, mx = 0;
+      for (let i = 0; i < W * H; i++) { const v = kd[i * 4]; if (v < mn) mn = v; if (v > mx) mx = v; }
+      r.keyHasContent = mn < 250 && mx > 5;
+      if (el) { el.checked = false; el.dispatchEvent(new Event('change')); }
+      r.ok = r.widgets && r.defaultsCenter && r.keyHasContent && boxes.length >= 3;
+    } catch (e) { r.ok = false; r.error = String(e); }
+    return r;
+  })();
+
   fxRes.allAffect = Object.entries(fxRes)
       .filter(([k, v]) => k !== 'deterministic' && typeof v === 'boolean')
       .every(([, v]) => v);
   out.live = fxRes;
 
   out.crash = out.realErrors.length > 0 || !out.preview.effectsLive || !out.animPreview.animated ||
-      !out.gif.anim.ok || !out.gif.static.ok || !out.gif.transparent.ok || !out.png.ok || !out.blue.ok ||
-      !out.live.allAffect || !out.exportUI.stillVisible || !out.exportUI.videoHidden || !out.modes.ok;
+      !out.gif.anim.ok || !out.gif.static.ok || !out.gif.transparent.ok || !out.png.ok || !out.seq.ok || !out.blue.ok ||
+      !out.live.allAffect || !out.live.maskAlign.ok || !out.live.reelLook.ok || !out.live.maskPreview.ok ||
+      !out.exportUI.stillVisible || !out.exportUI.videoHidden || !out.modes.ok;
   return out;
 
   /* helpers */

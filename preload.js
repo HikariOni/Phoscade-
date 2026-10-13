@@ -1,4 +1,4 @@
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('ditherStudio', {
   platform: process.platform,
@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('ditherStudio', {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node
-  }
+  },
+  saveSequence: (payload) => ipcRenderer.invoke('save-png-sequence', payload)
 });

@@ -7,6 +7,21 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div id="boot">
+    <style>
+      #boot { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: #060a12; color: #cdf3ff; transition: opacity .35s ease; }
+      #boot.done { opacity: 0; pointer-events: none; }
+      #boot .brand-mark { font: 700 26px 'Consolas', monospace; letter-spacing: .18em; color: #22d3ee; }
+      #boot .brand-mark b { color: #7ee787; }
+      #boot .bar { width: 220px; height: 3px; background: rgba(34,211,238,.15); border-radius: 2px; overflow: hidden; position: relative; }
+      #boot .bar::after { content: ''; position: absolute; inset: 0; width: 45%; background: #22d3ee; animation: bootslide 1.1s ease-in-out infinite; }
+      #boot .sub { font: 12px 'Segoe UI', sans-serif; letter-spacing: .3em; color: #5b7180; text-transform: uppercase; }
+      @keyframes bootslide { 0% { left: -45%; } 100% { left: 100%; } }
+    </style>
+    <div class="brand-mark">DITHER<b>//FOUNDRY</b></div>
+    <div class="bar"></div>
+    <div class="sub">inicializando · motor CRT</div>
+  </div>
   <div class="app">
     <header class="topbar">
       <div class="brand">
@@ -60,14 +75,24 @@
               <option value="burkes">Burkes</option>
               <option value="sierra">Sierra</option>
               <option value="sierra2">Sierra (2 filas)</option>
-              <option value="sierralite">Sierra Lite</option>
+              <option value="sierralite">Sierra 2-4A</option>
               <option value="atkinson">Atkinson</option>
+              <option value="adaptivefs3">Adaptive FS 3×3</option>
+              <option value="adaptivefs7">Adaptive FS 7×7</option>
+              <option value="customkernel">Kernel personalizado</option>
+              <option value="riemersma">Riemersma (Hilbert)</option>
               <option value="bayer">Bayer (Ordenado)</option>
               <option value="modulation" selected>Modulación (Ruidosa)</option>
               <option value="bitmappattern">Patrón de mapa de bits</option>
               <option value="ascii">ASCII</option>
             </select>
           </label>
+          <div class="divider-label">— DIFUSIÓN DE ERROR —</div>
+          <label class="field">
+            <span class="field-label">Error Strength <b id="valErrStr">0</b>%</span>
+            <input type="range" id="errStrength" min="0" max="150" value="0" />
+          </label>
+          <p class="hint">Fuerza de difusión del error a los vecinos: 0% = sin difusión, 100% = estándar, 150% = exagerado. Solo afecta a algoritmos de difusión de error.</p>
           <div id="algoOpts"></div>
           <div class="divider-label">— MÁSCARA SELECTIVA —</div>
           <label class="check">
@@ -85,7 +110,7 @@
               </select>
             </label>
             <label class="field">
-              <span class="field-label">Umbral <b id="valMaskTh">50</b></span>
+              <span class="field-label">Umbral de luminancia <b id="valMaskTh">50</b></span>
               <input type="range" id="maskThresh" min="0" max="100" value="50" />
             </label>
             <label class="field">
@@ -104,7 +129,15 @@
               <span class="field-label">Color de efecto</span>
               <input type="color" id="maskColor" value="#2a5aff" />
             </label>
-            <p class="hint">Composición de doble capa (imagen fija y video): la capa original (con el gradiente) queda viva a resolución completa y el dithering se aplica como capa de luminancia superpuesta, solo donde la máscara lo permite, con cualquier técnica (incluida difusión de error). La clave se calcula con la luma CRT (Rec.601) sobre la imagen ya procesada, por lo que coincide con lo que ves. El color de efecto también tiñe el Bloom del CRT.</p>
+            <label class="check">
+              <input type="checkbox" id="maskCenter" checked />
+              <span>Borde duro (centro de celda)</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="maskPreview" />
+              <span>Ver matte en el monitor</span>
+            </label>
+            <p class="hint">Pipeline de material en movimiento: solo aplica a video y GIF animado, nunca a imagen fija. Composición de doble capa: la capa original (con el gradiente) queda viva a resolución completa y el dithering se aplica como capa de luminancia superpuesta (overlay alineado a la rejilla), solo donde la máscara lo permite, con cualquier técnica (incluida difusión de error). La clave se calcula con la luma CRT (Rec.601) sobre la imagen ya procesada. El color de efecto también tiñe el Bloom del CRT.</p>
           </div>
           <div class="divider-label">— RANGO DE CORTE —</div>
           <label class="field">
@@ -114,6 +147,14 @@
           <label class="field">
             <span class="field-label">Corte claro <b id="valLight">100</b></span>
             <input type="range" id="lightCut" min="0" max="100" value="100" />
+          </label>
+          <label class="field">
+            <span class="field-label">Tonos medios (Gamma) <b id="valMid">1.00</b></span>
+            <input type="range" id="midGamma" min="50" max="200" value="100" />
+          </label>
+          <label class="field">
+            <span class="field-label">Compresión de luces <b id="valHl">0</b>%</span>
+            <input type="range" id="hlComp" min="0" max="100" value="0" />
           </label>
         </section>
 
@@ -234,9 +275,16 @@
             <label class="field">
               <span class="field-label">Tipo de tubo</span>
               <select id="crtType">
-                <option value="rect">Rectangular</option>
+                <option value="rect">Pantalla (60Hz · 768L)</option>
+                <option value="pal">PAL · 15kHz (625/576 · 50Hz)</option>
+                <option value="ntsc">NTSC · 15.7kHz (525/480 · 59.94)</option>
               </select>
             </label>
+            <label class="check">
+              <input type="checkbox" id="crtInterlace" checked />
+              <span>Interlace real (dos campos alternos)</span>
+            </label>
+            <p class="hint" id="crtSyncInfo">–</p>
             <label class="field">
               <span class="field-label">Máscara de fósforo</span>
               <select id="crtMask">
@@ -428,6 +476,7 @@
           </div>
           <div class="exp-grid">
             <button class="btn exp" id="btnVideo" title="Grabar WebM con MediaRecorder" hidden>WebM</button>
+            <button class="btn exp" id="btnSeq" title="Guardar secuencia PNG (metraje / VFX)" hidden>PNG SEQ</button>
           </div>
           <p class="hint" id="expHint"></p>
         </section>
@@ -444,8 +493,6 @@
             <div class="crt-screen">
               <div class="previewWrap" id="previewWrap">
                 <canvas id="preview"></canvas>
-                <div class="scan-overlay" aria-hidden="true"></div>
-                <div class="screen-vignette" aria-hidden="true"></div>
                 <div class="overlay-bar">
                   <span id="dimInfo">–</span>
                   <span id="algoInfo">en espera…</span>
@@ -484,11 +531,11 @@
     </div>
   </div>
 
-  <script src="gif.js"></script>
-  <script src="dither.js"></script>
-  <script src="crt.js"></script>
-  <script src="engine.js"></script>
-  <script src="export.js"></script>
-  <script src="app.js"></script>
+  <script src="gif.js" defer></script>
+  <script src="dither.js" defer></script>
+  <script src="crt.js" defer></script>
+  <script src="engine.js" defer></script>
+  <script src="export.js" defer></script>
+  <script src="app.js" defer></script>
 </body>
 </html>

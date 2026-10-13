@@ -28,7 +28,11 @@ npm start        # abre la ventana Electron
 
 Formatos aceptados: `PNG, JPEG, WEBP, GIF, BMP, AVIF, SVG` · video `MP4, WEBM, OGG, QuickTime`.
 
-Si cargas **video**, la app pasa automáticamente a fuente de animación `Video` y a exportación WebM.
+Si cargas **video**, la app pasa automáticamente a fuente de animación `Video` y a exportación WebM. Además aplica el **look de fábrica para reel**: degradado continuo en **blanco y negro** (`#000000 → #ffffff`), sin tocar el modo de trabajo ni la máscara.
+
+El preview del video se muestrea acotado al borde largo (**1280 px**) para agilidad; al exportar GIF/WebM/Secuencia el reel se **re-muestrea a resolución nativa** automáticamente.
+
+El arranque de la app es más liviano: splash de inicio, `ready-to-show` y scripts diferidos (`defer`), así la ventana aparece al instante sin ventana en blanco.
 
 ---
 
@@ -37,7 +41,7 @@ Si cargas **video**, la app pasa automáticamente a fuente de animación `Video`
 | Modo | Uso |
 |---|---|
 | **`[01] GLITCH ART`** | Imagen + animación/flicker. Exporta PNG/JPEG/SVG/GIF. |
-| **`[02] SELECTIVO`** | Reel B&N: el dithering se aplica solo donde lo permite la máscara. Fuente video/imagen fija. |
+| **`[02] SELECTIVO`** | Reel B&N: el dithering se aplica solo donde lo permite la máscara. Fuente **video o GIF animado** (la máscara nunca se aplica a imagen fija). |
 
 ---
 
@@ -74,9 +78,13 @@ Los presets propios se guardan en `localStorage` (clave `ditherfx.presets.v1`); 
 ### Máscara selectiva
 Activable independientemente del modo. **Composición de doble capa**: la imagen original queda viva a resolución completa y el dithering se aplica como capa de luminancia donde la máscara lo permite (funciona con cualquier técnica, incluida difusión de error).
 
+Solo actúa sobre **material en movimiento** (video importado o GIF animado); con imagen fija la máscara queda inactiva y la salida es el dither sin doble capa. Con `mult > 1` el matte se muestrea por celda de grano y se expande a bloques idénticos al estampado (overlay alineado a la rejilla, borde sin invasión de media celda); con `mult = 1` la clave es por píxel.
+
 - Fuente: Brillo (luces), Medios (tonos medios), Bordes (rim-light), Sombra
 - Umbral, suavizado, opacidad de máscara
 - Capa afectada en blanco y negro (toggle)
+- **Borde duro (centro de celda)**: con `mult > 1` cada celda se decide por su píxel central en vez del promedio, así el borde del overlay cae exacto sobre la frontera de celdas (sin celda de mezcla a media intensidad). Activo por defecto.
+- **Ver matte en el monitor**: overlay de monitoreo que muestra la clave (blanco/negro) sobre el preview mientras ajustás umbral/suavizado. Es solo visual, la salida/export no lo incluye.
 - Color de efecto (también tiñe el Bloom del CRT)
 - La clave se calcula con luma CRT (Rec.601) sobre la imagen procesada
 
