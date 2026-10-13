@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:">
+  <title>DITHER//FOUNDRY</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon">
+          <span class="g1"></span><span class="g2"></span><span class="g3"></span>
+        </div>
+        <div class="brand-text">
+          <h1>DITHER<span>//FOUNDRY</span><span class="cursor">▌</span></h1>
+          <p>dithering · paletas · CRT · reel</p>
+        </div>
+      </div>
+      <div class="mode-switch" id="modeSwitch" role="tablist" aria-label="Modo de trabajo">
+        <button class="mode-btn active" id="modeGlitch" data-mode="glitch" type="button" role="tab">
+          <b>[01] GLITCH ART</b><span>imagen · GIF · video</span>
+        </button>
+        <button class="mode-btn" id="modeSelective" data-mode="selective" type="button" role="tab">
+          <b>[02] SELECTIVO</b><span>reel · máscara B&amp;N</span>
+        </button>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn ghost" id="btnSample" title="Cargar imagen de muestra">≋ MUESTRA</button>
+        <button class="btn primary" id="btnUpload">⇪ CARGAR IMAGEN / VIDEO</button>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif,image/svg+xml,video/mp4,video/webm,video/ogg,video/quicktime" hidden />
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="panel">
+        <section class="card rack" id="secAlgo">
+          <h2 class="card-title"><span class="rack-num">01</span> // ALGORITMO</h2>
+          <label class="field">
+            <span class="field-label">Preset</span>
+            <select id="presetSelect">
+              <option value="custom">Custom (manual)</option>
+            </select>
+          </label>
+          <div class="row-btns">
+            <input id="presetName" placeholder="nombre_preset" style="flex:1;min-width:0" />
+          </div>
+          <div class="row-btns">
+            <button class="btn small" id="btnPresetSave">GUARDAR</button>
+            <button class="btn small" id="btnPresetDelete">BORRAR</button>
+          </div>
+          <label class="field">
+            <span class="field-label">Técnica de dithering</span>
+            <select id="algoSelect">
+              <option value="floydsteinberg">Floyd–Steinberg</option>
+              <option value="falsefloyd">False Floyd–Steinberg</option>
+              <option value="jarvis">Jarvis–Judice–Ninke</option>
+              <option value="stucki">Stucki</option>
+              <option value="burkes">Burkes</option>
+              <option value="sierra">Sierra</option>
+              <option value="sierra2">Sierra (2 filas)</option>
+              <option value="sierralite">Sierra Lite</option>
+              <option value="atkinson">Atkinson</option>
+              <option value="bayer">Bayer (Ordenado)</option>
+              <option value="modulation" selected>Modulación (Ruidosa)</option>
+              <option value="bitmappattern">Patrón de mapa de bits</option>
+              <option value="ascii">ASCII</option>
+            </select>
+          </label>
+          <div id="algoOpts"></div>
+          <div class="divider-label">— MÁSCARA SELECTIVA —</div>
+          <label class="check">
+            <input type="checkbox" id="maskCheck" />
+            <span>Activar máscara selectiva</span>
+          </label>
+          <div id="maskOpts" class="hidden">
+            <label class="field">
+              <span class="field-label">Fuente</span>
+              <select id="maskSource">
+                <option value="brillo" selected>Brillo (luces)</option>
+                <option value="medios">Medios (tonos medios)</option>
+                <option value="bordes">Bordes (rim-light)</option>
+                <option value="sombra">Sombra</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Umbral <b id="valMaskTh">50</b></span>
+              <input type="range" id="maskThresh" min="0" max="100" value="50" />
+            </label>
+            <label class="field">
+              <span class="field-label">Suavizado <b id="valMaskSm">25</b></span>
+              <input type="range" id="maskSmooth" min="0" max="100" value="25" />
+            </label>
+            <label class="field">
+              <span class="field-label">Opacidad de máscara <b id="valMaskOp">100</b>%</span>
+              <input type="range" id="maskOpacity" min="0" max="100" value="100" />
+            </label>
+            <label class="check">
+              <input type="checkbox" id="maskBW" checked />
+              <span>Capa afectada en blanco y negro</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Color de efecto</span>
+              <input type="color" id="maskColor" value="#2a5aff" />
+            </label>
+            <p class="hint">Composición de doble capa (imagen fija y video): la capa original (con el gradiente) queda viva a resolución completa y el dithering se aplica como capa de luminancia superpuesta, solo donde la máscara lo permite, con cualquier técnica (incluida difusión de error). La clave se calcula con la luma CRT (Rec.601) sobre la imagen ya procesada, por lo que coincide con lo que ves. El color de efecto también tiñe el Bloom del CRT.</p>
+          </div>
+          <div class="divider-label">— RANGO DE CORTE —</div>
+          <label class="field">
+            <span class="field-label">Corte oscuro <b id="valDark">0</b></span>
+            <input type="range" id="darkCut" min="0" max="100" value="0" />
+          </label>
+          <label class="field">
+            <span class="field-label">Corte claro <b id="valLight">100</b></span>
+            <input type="range" id="lightCut" min="0" max="100" value="100" />
+          </label>
+        </section>
+
+        <section class="card rack" id="secColor">
+          <h2 class="card-title"><span class="rack-num">02</span> // COLOR + PALETA <span class="badge" id="palCount">0</span></h2>
+          <label class="field">
+            <span class="field-label">Modo de color</span>
+            <select id="colorMode">
+              <option value="bw">Blanco y negro</option>
+              <option value="duotone">Duotono</option>
+              <option value="tritone" selected>Tritono</option>
+              <option value="preserve">Preservar colores</option>
+              <option value="palRueda">Paleta · Rueda (Colorama)</option>
+            </select>
+          </label>
+          <div id="colorOpts"></div>
+          <div class="divider-label">— PALETA —</div>
+          <details id="palPalette" class="paleta">
+            <summary>Editar paleta</summary>
+            <label class="field">
+              <span class="field-label">Presets</span>
+              <select id="palPreset">
+                <option value="pico8">PICO-8 (32)</option>
+                <option value="sweetie16">Sweetie 16 (16)</option>
+                <option value="apollo">Apollo (12)</option>
+                <option value="coldgray">Cold Gray (8)</option>
+                <option value="commodore">Commodore (16)</option>
+                <option value="journey">Journey (16)</option>
+                <option value="1bit">1-Bit Monocromo (2)</option>
+              </select>
+            </label>
+            <div class="row-btns">
+              <button class="btn ghost small" id="btnPalLoad">Cargar preset</button>
+              <button class="btn ghost small" id="btnPalImport">Importar archivo</button>
+            </div>
+            <input type="file" id="palFile" accept=".gpl,.pal,.txt,.hex,.colors,.json" hidden />
+            <details>
+              <summary>O pegar colores</summary>
+              <textarea id="palText" rows="3" spellcheck="false" placeholder='#000000\n#ffffff\nu otros formatos (rgb(0,0,0), 0 0 0, nombres…)'></textarea>
+              <button class="btn ghost small" id="btnPalText">Aplicar texto</button>
+            </details>
+            <div id="palSwatches" class="swatches"></div>
+            <div class="pal-apply">
+              <button class="btn ghost small" id="btnPalTri">Colores → Tritono</button>
+            </div>
+            <div class="divider-label">— EDITOR DE COLOR —</div>
+            <div class="pal-editor">
+              <canvas id="colorWheel" width="190" height="190"></canvas>
+              <div class="pal-editor-side">
+                <label class="field">
+                  <span class="field-label">Valor <b id="valWheelV">85</b></span>
+                  <input type="range" id="wheelValue" min="10" max="100" value="85" />
+                </label>
+                <label class="field">
+                  <span class="field-label">Color hexadecimal</span>
+                  <input type="text" id="palHex" value="#ffffff" spellcheck="false" />
+                </label>
+                <div class="row-btns">
+                  <button class="btn ghost small" id="btnPalAdd">+ Añadir</button>
+                  <button class="btn ghost small" id="btnPalDel">Borrar sel.</button>
+                </div>
+                <p class="hint" id="palSelHint">Haz clic en un swatch para editarlo.</p>
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <section class="card rack" id="secPre">
+          <h2 class="card-title"><span class="rack-num">03</span> // PRE-PROCESO</h2>
+          <label class="field">
+            <span class="field-label">Brillo <b id="valBright">0</b></span>
+            <input type="range" id="preBrightness" min="-100" max="100" value="0" />
+          </label>
+          <label class="field">
+            <span class="field-label">Contraste <b id="valContrast">0</b></span>
+            <input type="range" id="preContrast" min="-100" max="100" value="0" />
+          </label>
+          <label class="field">
+            <span class="field-label">Gamma <b id="valGamma">1.00</b></span>
+            <input type="range" id="preGamma" min="10" max="300" value="100" />
+          </label>
+          <div class="divider-label">— CURVA DE TONO —</div>
+          <canvas id="toneCurve" width="190" height="190" title="Clic añade punto · arrastra mueve · doble clic elimina"></canvas>
+          <button class="btn ghost small" id="btnCurveReset">Restablecer curva</button>
+          <p class="hint">Curva RGB aplicada tras Brillo/Gamma/Contraste. Clic añade punto, arrastra mueve, doble clic elimina.</p>
+          <label class="field">
+            <span class="field-label">Enfoque (Sharpen) <b id="valSharpen">0</b>%</span>
+            <input type="range" id="sharpen" min="0" max="100" value="0" />
+          </label>
+        </section>
+
+        <section class="card rack" id="secOut">
+          <h2 class="card-title"><span class="rack-num">04</span> // SALIDA</h2>
+          <div class="row">
+            <label class="check">
+              <input type="checkbox" id="transpCheck" />
+              <span>Fondo transparente</span>
+            </label>
+            <select id="transpWhich" disabled>
+              <option value="lightest">Dejar claro transparente</option>
+              <option value="darkest">Dejar oscuro transparente</option>
+            </select>
+          </div>
+          <label class="field">
+            <span class="field-label">Color de relleno (JPEG)</span>
+            <input type="color" id="bgColor" value="#0b0f1a" />
+          </label>
+        </section>
+
+        <section class="card rack accent-card" id="secCrt">
+          <h2 class="card-title"><span class="rack-num">05</span> // CRT-EMULATOR <span class="chip">SA-90</span></h2>
+          <label class="check">
+            <input type="checkbox" id="crtCheck" checked />
+            <span>Activar efecto CRT</span>
+          </label>
+          <div id="crtOpts" class="hidden">
+            <div class="divider-label">— TUBO Y SEÑAL —</div>
+            <label class="field">
+              <span class="field-label">Tipo de tubo</span>
+              <select id="crtType">
+                <option value="rect">Rectangular</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Máscara de fósforo</span>
+              <select id="crtMask">
+                <option value="grille">Rejilla (Trinitron)</option>
+                <option value="shadow">Sombra (triadas)</option>
+                <option value="none">Ninguna</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Scanlines <b id="valCrtScan">60</b></span>
+              <input type="range" id="crtScanlines" min="0" max="100" value="60" />
+            </label>
+            <label class="field">
+              <span class="field-label">Máscara RGB <b id="valCrtPhos">50</b></span>
+              <input type="range" id="crtPhosphor" min="0" max="100" value="50" />
+            </label>
+            <label class="field">
+              <span class="field-label">Marco / bezel <b id="valCrtFrame">40</b></span>
+              <input type="range" id="crtFrame" min="0" max="100" value="40" />
+            </label>
+            <label class="field">
+              <span class="field-label">Hue-Color <b id="valCrtHue">0°</b></span>
+              <input type="range" id="crtHue" min="0" max="360" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Curvatura <b id="valCrtCurv">30</b></span>
+              <input type="range" id="crtCurvature" min="0" max="100" value="30" />
+            </label>
+            <label class="field">
+              <span class="field-label">Eyefish 90s <b id="valCrtEye">0</b></span>
+              <input type="range" id="crtEyefish" min="0" max="100" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Eyefish Radius <b id="valCrtEyeR">100</b></span>
+              <input type="range" id="crtEyefishR" min="0" max="100" value="100" />
+            </label>
+            <div class="divider-label">— BLOOM (FÓSFORO) —</div>
+            <label class="field">
+              <span class="field-label">Bloom <b id="valCrtBloom">35</b></span>
+              <input type="range" id="crtBloom" min="0" max="100" value="35" />
+            </label>
+            <label class="field">
+              <span class="field-label">Umbral de borde <b id="valCrtBloomThresh">30</b></span>
+              <input type="range" id="crtBloomThresh" min="0" max="100" value="30" />
+            </label>
+            <label class="field">
+              <span class="field-label">Dispersión cromática <b id="valCrtBloomChrom">2</b> px</span>
+              <input type="range" id="crtBloomChrom" min="0" max="20" value="2" />
+            </label>
+            <label class="field">
+              <span class="field-label">Tint</span>
+              <input type="color" id="crtBloomTint" value="#ff00cc" />
+            </label>
+            <label class="field">
+              <span class="field-label">Mezcla</span>
+              <select id="crtBloomBlend">
+                <option value="screen">Screen (lumen)</option>
+                <option value="lighter">Add / Linear Dodge</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Persistencia fósforo <b id="valCrtTrail">40</b></span>
+              <input type="range" id="crtTrail" min="0" max="100" value="40" />
+            </label>
+            <label class="field">
+              <span class="field-label">Raster bloom <b id="valCrtRaster">25</b></span>
+              <input type="range" id="crtRaster" min="0" max="100" value="25" />
+            </label>
+            <div class="divider-label">— DEFECTOS DE CINTA —</div>
+            <label class="field">
+              <span class="field-label">VHS Dropouts <b id="valCrtDrop">0</b></span>
+              <input type="range" id="crtDropout" min="0" max="100" value="0" />
+            </label>
+            <div class="divider-label">— ÓPTICA Y COLOR —</div>
+            <label class="field">
+              <span class="field-label">Vibrance <b id="valCrtVib">20</b></span>
+              <input type="range" id="crtVibrance" min="0" max="100" value="20" />
+            </label>
+            <label class="field">
+              <span class="field-label">Saturation <b id="valCrtSat">100</b>%</span>
+              <input type="range" id="crtSatur" min="0" max="200" value="100" />
+            </label>
+            <label class="field">
+              <span class="field-label">V-Hold roll <b id="valCrtRoll">0</b></span>
+              <input type="range" id="crtRoll" min="0" max="100" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Convergencia <b id="valCrtConv">0</b></span>
+              <input type="range" id="crtConv" min="0" max="100" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">EchoFX <b id="valCrtEcho">0</b></span>
+              <input type="range" id="crtEcho" min="0" max="100" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Sangrado RGB</span>
+              <select id="crtEchoMode">
+                <option value="ghost">Señal (ghost)</option>
+                <option value="rgb" selected>Sangrado RGB (ecos R/G/B)</option>
+              </select>
+            </label>
+            <p class="hint">El efecto se aplica al resultado final y queda incluido en la exportación. El parpadeo se anima en vivo y en los GIF.</p>
+          </div>
+        </section>
+
+        <section class="card rack" id="secAnim">
+          <h2 class="card-title"><span class="rack-num">06</span> // ANIMACIÓN <span class="chip">ruido · onda · ecos</span></h2>
+          <label class="check">
+            <input type="checkbox" id="animCheck" />
+            <span>Activar animación</span>
+          </label>
+          <div id="animOpts" class="hidden">
+            <label class="field">
+              <span class="field-label">Fuente</span>
+              <select id="animSource">
+                <option value="procedural">Procedural (imagen actual)</option>
+                <option value="video">Video cargado (Boomerang real)</option>
+                <option value="gif">GIF cargado (frames reales)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Ruido animado <b id="valAnimNoise">40</b></span>
+              <input type="range" id="animNoise" min="0" max="100" value="40" />
+            </label>
+            <div class="divider-label">— ONDA DE FRECUENCIA (H-SYNC) —</div>
+            <label class="field">
+              <span class="field-label">Amplitud <b id="valWave">0</b> px</span>
+              <input type="range" id="waveAmount" min="0" max="40" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Frecuencia <b id="valWaveFreq">1.5</b></span>
+              <input type="range" id="waveFreq" min="1" max="60" value="15" />
+            </label>
+            <label class="field">
+              <span class="field-label">Velocidad <b id="valWaveSpd">20</b></span>
+              <input type="range" id="waveSpeed" min="0" max="100" value="20" />
+            </label>
+            <label class="field">
+              <span class="field-label">Sesgo diagonal <b id="valWaveSkew">0</b></span>
+              <input type="range" id="waveSkew" min="-100" max="100" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Forma</span>
+              <select id="waveForm">
+                <option value="sin" selected>Sinusoidal (hum)</option>
+                <option value="tri">Triangular</option>
+                <option value="saw">Sierra</option>
+                <option value="square">Cuadrada</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Eco temporal entre frames <b id="valAnimEcho">0</b>%</span>
+              <input type="range" id="animEcho" min="0" max="100" value="0" />
+            </label>
+            <label class="check">
+              <input type="checkbox" id="animBoomerang" checked />
+              <span>Modo Boomerang / Ping-pong ↺</span>
+            </label>
+            <div id="videoOpts" class="hidden">
+              <label class="field">
+                <span class="field-label">Duración a muestrear <b id="valVidDur">1.5</b>s</span>
+                <input type="range" id="vidDuration" min="0.5" max="4" step="0.1" value="1.5" />
+              </label>
+              <label class="field">
+                <span class="field-label">Hold final <b id="valVidHold">2</b> frames</span>
+                <input type="range" id="vidHold" min="0" max="6" step="1" value="2" />
+              </label>
+              <p class="hint" id="vidHint">Carga un video corto (MP4/WebM). Se muestrean N fotogramas y se ditherizan.</p>
+            </div>
+            <label class="field">
+              <span class="field-label">Ritmo <b id="valRhythm">8</b></span>
+              <input type="range" id="animRhythm" min="2" max="24" value="8" />
+            </label>
+            <label class="field">
+              <span class="field-label">Flicker de tubo <b id="valCrtFlk">0</b></span>
+              <input type="range" id="crtFlicker" min="0" max="100" value="0" />
+            </label>
+            <p class="hint" id="animHint">Anima el ruido propio del dither de cada algoritmo, la onda H-sync (hum de deflexión) y el eco temporal entre frames, más el flicker del tubo. Todo indexado por frame: preview = GIF/WebM. La fuente GIF usa los frames reales del archivo.</p>
+          </div>
+        </section>
+
+        <section class="card rack" id="secExp">
+          <h2 class="card-title"><span class="rack-num">07</span> // EXPORT</h2>
+          <div class="exp-grid">
+            <button class="btn exp exp-still" id="btnPng">PNG</button>
+            <button class="btn exp exp-still" id="btnJpeg">JPEG</button>
+            <button class="btn exp exp-still" id="btnSvg">SVG</button>
+            <button class="btn exp" id="btnGif">GIF</button>
+          </div>
+          <div class="exp-grid">
+            <button class="btn exp" id="btnVideo" title="Grabar WebM con MediaRecorder" hidden>WebM</button>
+          </div>
+          <p class="hint" id="expHint"></p>
+        </section>
+
+        <div class="rack-console">
+          <span class="con-line"><b>SYS.CRT</b>::fósforo P1 · señal PAL <span class="con-ok">OK</span></span>
+          <span class="con-line dim">DITHER_FOUNDRY v-SPACE · motor StudioEngine</span>
+        </div>
+      </aside>
+
+      <section class="stage">
+        <div class="crt-monitor">
+          <div class="crt-monitor-mask">
+            <div class="crt-screen">
+              <div class="previewWrap" id="previewWrap">
+                <canvas id="preview"></canvas>
+                <div class="scan-overlay" aria-hidden="true"></div>
+                <div class="screen-vignette" aria-hidden="true"></div>
+                <div class="overlay-bar">
+                  <span id="dimInfo">–</span>
+                  <span id="algoInfo">en espera…</span>
+                  <div class="overlay-actions">
+                    <button id="btnFit" class="minibtn active" title="Ajustar">AJUSTAR</button>
+                    <button id="btn100" class="minibtn" title="100%">100%</button>
+                  </div>
+                </div>
+                <div class="drop-hint" id="dropHint">
+                  <div class="drop-icon">⇪</div>
+                  <p>SUELTA UNA IMAGEN AQUÍ</p>
+                  <p class="sub">o usa <b>Cargar imagen / video</b> arriba</p>
+                </div>
+              </div>
+            </div>
+            <div class="monitor-lbl tl">CRT/01</div>
+            <div class="monitor-lbl tr">PAL</div>
+            <div class="monitor-lbl br">CH-01</div>
+          </div>
+          <div class="crt-monitor-bottom">
+            <span class="pow">◉</span>
+            <span>DITHER:FOUNDRY MONITOR</span>
+            <span class="dim2">50Hz · 8kV</span>
+          </div>
+        </div>
+        <div class="toast hidden" id="toast"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="dropzone-overlay hidden" id="dropOverlay">
+    <div class="dropzone-box">
+      <div class="drop-icon big">⇪</div>
+      <h2>SUELTA TU IMAGEN / VIDEO</h2>
+      <p>PNG · JPEG · WEBP · GIF · BMP · AVIF · SVG · MP4 · WEBM</p>
+    </div>
+  </div>
+
+  <script src="gif.js"></script>
+  <script src="dither.js"></script>
+  <script src="crt.js"></script>
+  <script src="engine.js"></script>
+  <script src="export.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

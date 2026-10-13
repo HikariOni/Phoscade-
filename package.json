@@ -1,0 +1,15 @@
+{
+  "name": "dither-studio",
+  "productName": "Dither Studio",
+  "version": "1.0.0",
+  "description": "Dithering studio with CRT emulator, animation and multi-format export",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "Kozneo Foundry",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^44.3.0"
+  }
+}
